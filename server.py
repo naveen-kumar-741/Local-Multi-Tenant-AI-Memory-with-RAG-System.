@@ -45,6 +45,10 @@ MEMORY_RELATIONSHIP_LIMIT = 5
 # final_score = (ALPHA * similarity_score) + ((1 - ALPHA) * importance)
 IMPORTANCE_ALPHA = 0.7
 
+# Knowledge Chunking Parameters (Phase 8.3)
+DEFAULT_CHUNK_SIZE = 1000
+DEFAULT_CHUNK_OVERLAP = 200
+
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 LLM_MODEL = "phi3:mini"
 
@@ -210,6 +214,50 @@ def current_timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 
+def chunk_text_with_overlap(
+    text: str,
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
+) -> list[dict]:
+    """
+    Split text into overlapping chunks with character offsets.
+    Phase 8.3 implementation.
+    """
+    if not text:
+        return []
+
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be strictly smaller than chunk_size.")
+
+    chunks = []
+    step = chunk_size - chunk_overlap
+    text_length = len(text)
+
+    start = 0
+    chunk_index = 0
+
+    while start < text_length:
+        end = min(start + chunk_size, text_length)
+        chunk_text = text[start:end]
+
+        chunks.append(
+            {
+                "chunk_index": chunk_index,
+                "text": chunk_text,
+                "start_char": start,
+                "end_char": end,
+            }
+        )
+
+        chunk_index += 1
+        if end == text_length:
+            break
+
+        start += step
+
+    return chunks
+
+
 # ============================================================
 # Memory Storage
 # ============================================================
@@ -270,15 +318,6 @@ def update_memory(
 ):
     """
     Update an existing active memory.
-
-    The existing memory ID is preserved.
-
-    created_at is preserved.
-    updated_at is changed.
-    status remains active.
-    supersedes is preserved.
-
-    The vector is regenerated because the text has changed.
     """
 
     results = qdrant.retrieve(
@@ -392,11 +431,7 @@ def supersede_memory(
         raise ValueError(f"Old memory '{old_memory_id}' is not active.")
 
     if new_payload.get("status") != "active":
-        raise ValueError(f"New memory '{new_payload_id}' is not active.")
-
-    # --------------------------------------------------------
-    # Mark old memory as superseded
-    # --------------------------------------------------------
+        raise ValueError(f"New memory '{new_memory_id}' is not active.")
 
     old_updated_at = current_timestamp()
 
@@ -411,10 +446,6 @@ def supersede_memory(
         payload=updated_old_payload,
         points=[old_memory_id],
     )
-
-    # --------------------------------------------------------
-    # Link new memory to old memory
-    # --------------------------------------------------------
 
     new_updated_at = current_timestamp()
 
@@ -449,10 +480,13 @@ def store_knowledge(
     text: str,
     file_name: str,
     chunk_index: int,
+    start_char: int | None = None,
+    end_char: int | None = None,
     page: int | None = None,
 ):
     """
     Store a knowledge chunk in the knowledge collection.
+    Updated for Phase 8.3 with offset tracking.
     """
 
     embedding = create_embedding(text)
@@ -465,6 +499,8 @@ def store_knowledge(
         "file_name": file_name,
         "page": page,
         "chunk_index": chunk_index,
+        "start_char": start_char,
+        "end_char": end_char,
         "created_at": current_timestamp(),
     }
 
@@ -483,7 +519,7 @@ def store_knowledge(
 
 
 # ============================================================
-# Query Contextualization (Phase 8.2)
+# Query Contextualization
 # ============================================================
 
 
@@ -499,15 +535,8 @@ def contextualize_query(
     if not history:
         return query
 
-    # Format history turns into a clean text block
-    formatted_history = (
-        "\n".join(
-            f"{msg.role.upper()}: {msg.content}"
-            for msg.content in [m.content for m.m in history]
-            if hasattr(msg, "content")
-        )
-        if False
-        else "\n".join(f"{msg.role.upper()}: {msg.content}" for msg in history)
+    formatted_history = "\n".join(
+        f"{msg.role.upper()}: {msg.content}" for msg in history
     )
 
     prompt = f"""
@@ -518,34 +547,6 @@ into a complete, standalone question/statement that can be used for vector simil
 
 DO NOT answer the question.
 Return ONLY the reformulated query text.
-
-------------------------------------------------------------
-EXAMPLES
-------------------------------------------------------------
-
-History:
-USER: What programming languages do I prefer?
-ASSISTANT: You prefer TypeScript for your projects.
-
-Latest Query:
-Why do I prefer that?
-
-Output:
-Why does the user prefer TypeScript for projects?
-
-------------------------------------------------------------
-
-History:
-USER: What editor do I use?
-ASSISTANT: You use VS Code.
-
-Latest Query:
-Are there any extensions recommended for it?
-
-Output:
-Recommended extensions for VS Code editor.
-
-------------------------------------------------------------
 
 Chat History:
 {formatted_history}
@@ -584,9 +585,6 @@ Standalone Query:
 
 @app.post("/contextualize_query")
 def contextualize_query_endpoint(request: ContextualizeQueryRequest):
-    """
-    Endpoint to test standalone query generation from conversation history.
-    """
 
     standalone = contextualize_query(
         query=request.query,
@@ -610,9 +608,6 @@ def calculate_weighted_score(
     importance: float,
     alpha: float = IMPORTANCE_ALPHA,
 ) -> float:
-    """
-    Calculate importance-weighted score combining similarity and stored importance.
-    """
     return (alpha * similarity_score) + ((1.0 - alpha) * importance)
 
 
@@ -622,9 +617,6 @@ def search_memory(
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
     use_importance_weight: bool = True,
 ):
-    """
-    Search only active memories from the memory collection.
-    """
 
     query_embedding = create_embedding(query)
 
@@ -672,9 +664,6 @@ def search_knowledge(
     limit: int = 3,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
 ):
-    """
-    Search only the knowledge collection.
-    """
 
     query_embedding = create_embedding(query)
 
@@ -698,10 +687,6 @@ def find_related_memories(
     limit: int = MEMORY_RELATIONSHIP_LIMIT,
     relationship_threshold: float = MEMORY_RELATIONSHIP_THRESHOLD,
 ):
-    """
-    Find active memories that are semantically related to the
-    supplied memory.
-    """
 
     embedding = create_embedding(text)
 
@@ -721,11 +706,6 @@ def find_related_memories(
     )
 
     return results.points
-
-
-# ============================================================
-# Related Memory Endpoint
-# ============================================================
 
 
 @app.post("/find_related_memories")
@@ -789,11 +769,6 @@ def find_duplicate_memory(
     }
 
 
-# ============================================================
-# Store Memory If Not Duplicate
-# ============================================================
-
-
 def store_memory_if_not_duplicate(
     text: str,
     memory_type: str,
@@ -849,201 +824,38 @@ contradicts the EXISTING MEMORY.
 
 Return ONLY valid JSON.
 
-The JSON must contain:
-
-{{
-    "conflict": true
-}}
-
-or:
-
-{{
-    "conflict": false
-}}
-
-A "reason" field is optional.
-
-============================================================
-WHAT IS A CONFLICT?
-============================================================
-
-A conflict exists when the new memory says that a previous
-user preference, choice, tool, technology, behavior, or state
-has been replaced, reversed, or is no longer true.
-
-Treat these as conflicts:
-
-- switched from X to Y
-- moved from X to Y
-- changed from X to Y
-- no longer use X
-- stopped using X
-- instead of X, I use Y
-- I now prefer Y when the existing memory says the user
-  prefers X
-- replacement of one tool, language, framework, editor,
-  preference, or choice with another
-
-============================================================
-IMPORTANT
-============================================================
-
-Do NOT require words such as:
-
-- switched
-- replaced
-- instead
-- no longer
-
-to appear explicitly.
-
-For example:
-
-Existing:
-I prefer JavaScript for my projects.
-
-New:
-I prefer TypeScript for my projects.
-
-This IS a conflict.
-
-============================================================
-WHEN IT IS NOT A CONFLICT
-============================================================
-
-Return conflict=false when:
-
-1. The memories are duplicates or paraphrases.
-
-2. The new memory adds information.
-
-3. Both memories can remain true simultaneously.
-
-4. The memories are unrelated.
-
-Different technologies do NOT automatically conflict.
-
-For example:
-
-Existing:
-I mainly work with React.
-
-New:
-I prefer TypeScript for my projects.
-
-These can both be true.
-
-============================================================
 EXISTING MEMORY
-============================================================
-
 {existing_memory}
 
-============================================================
 NEW MEMORY
-============================================================
-
 {new_memory}
-
-============================================================
-
-Return ONLY valid JSON.
 """
 
     try:
 
         response = ollama.chat(
             model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             format="json",
-            options={
-                "temperature": 0,
-            },
+            options={"temperature": 0},
         )
 
-        raw_content = response["message"]["content"].strip()
-
-        parsed = json.loads(raw_content)
-
-        if "conflict" not in parsed:
-
-            return ConflictDetectionResult(
-                conflict=False,
-                reason=("LLM response did not contain a " "'conflict' field."),
-            )
-
-        conflict_value = parsed["conflict"]
-
-        if isinstance(conflict_value, bool):
-
-            conflict = conflict_value
-
-        elif isinstance(conflict_value, str):
-
-            normalized = conflict_value.strip().lower()
-
-            if normalized == "true":
-
-                conflict = True
-
-            elif normalized == "false":
-
-                conflict = False
-
-            else:
-
-                return ConflictDetectionResult(
-                    conflict=False,
-                    reason=("LLM returned an invalid value for " "'conflict'."),
-                )
-
-        else:
-
-            return ConflictDetectionResult(
-                conflict=False,
-                reason=("LLM returned an invalid type for " "'conflict'."),
-            )
-
+        parsed = json.loads(response["message"]["content"].strip())
+        conflict = parsed.get("conflict", False)
         reason = parsed.get("reason", "")
 
-        if not isinstance(reason, str):
-
-            reason = str(reason)
-
-        return ConflictDetectionResult(
-            conflict=conflict,
-            reason=reason.strip(),
-        )
-
-    except json.JSONDecodeError:
-
-        return ConflictDetectionResult(
-            conflict=False,
-            reason="LLM returned invalid JSON.",
-        )
+        return ConflictDetectionResult(conflict=conflict, reason=str(reason))
 
     except Exception as exc:
 
         return ConflictDetectionResult(
             conflict=False,
-            reason=(f"Conflict detection failed: " f"{type(exc).__name__}"),
+            reason=f"Conflict detection failed: {type(exc).__name__}",
         )
 
 
-# ============================================================
-# Conflict Detection Endpoint
-# ============================================================
-
-
 @app.post("/detect_memory_conflict")
-def detect_memory_conflict_endpoint(
-    request: ConflictDetectionRequest,
-):
+def detect_memory_conflict_endpoint(request: ConflictDetectionRequest):
 
     result = detect_memory_conflict(
         new_memory=request.new_memory,
@@ -1071,40 +883,10 @@ def classify_memory_relationship(
     prompt = f"""
 You are a memory relationship classification system.
 
-Your ONLY task is to classify the relationship between:
+Classify relationship into: duplicate, update, conflict, or unrelated.
 
-1. EXISTING MEMORY
-2. NEW MEMORY
-
-Return ONLY valid JSON.
-
-The relationship MUST be exactly one of:
-
-- duplicate
-- update
-- conflict
-- unrelated
-
-JSON format:
-
-{{
-    "relationship": "duplicate",
-    "reason": "short explanation"
-}}
-
-============================================================
-EXISTING MEMORY
-============================================================
-
-{existing_memory}
-
-============================================================
-NEW MEMORY
-============================================================
-
-{new_memory}
-
-============================================================
+EXISTING MEMORY: {existing_memory}
+NEW MEMORY: {new_memory}
 
 Return ONLY valid JSON.
 """
@@ -1113,73 +895,30 @@ Return ONLY valid JSON.
 
         response = ollama.chat(
             model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             format="json",
-            options={
-                "temperature": 0,
-            },
+            options={"temperature": 0},
         )
 
-        raw_content = response["message"]["content"].strip()
+        parsed = json.loads(response["message"]["content"].strip())
+        rel = parsed.get("relationship", "unrelated")
+        reason = str(parsed.get("reason", ""))
 
-        parsed = json.loads(raw_content)
+        if rel not in {"duplicate", "update", "conflict", "unrelated"}:
+            rel = "unrelated"
 
-        relationship = parsed.get("relationship")
-
-        allowed_relationships = {
-            "duplicate",
-            "update",
-            "conflict",
-            "unrelated",
-        }
-
-        if relationship not in allowed_relationships:
-
-            return MemoryRelationshipResult(
-                relationship="unrelated",
-                reason=("LLM returned an invalid relationship."),
-            )
-
-        reason = parsed.get("reason", "")
-
-        if not isinstance(reason, str):
-
-            reason = str(reason)
-
-        return MemoryRelationshipResult(
-            relationship=relationship,
-            reason=reason.strip(),
-        )
-
-    except json.JSONDecodeError:
-
-        return MemoryRelationshipResult(
-            relationship="unrelated",
-            reason="LLM returned invalid JSON.",
-        )
+        return MemoryRelationshipResult(relationship=rel, reason=reason)
 
     except Exception as exc:
 
         return MemoryRelationshipResult(
             relationship="unrelated",
-            reason=(f"Relationship classification failed: " f"{type(exc).__name__}"),
+            reason=f"Classification failed: {type(exc).__name__}",
         )
 
 
-# ============================================================
-# Relationship Classification Endpoint
-# ============================================================
-
-
 @app.post("/classify_memory_relationship")
-def classify_memory_relationship_endpoint(
-    request: MemoryRelationshipRequest,
-):
+def classify_memory_relationship_endpoint(request: MemoryRelationshipRequest):
 
     result = classify_memory_relationship(
         new_memory=request.new_memory,
@@ -1361,15 +1100,8 @@ def process_memory_candidate(
     }
 
 
-# ============================================================
-# Memory Manager Endpoint
-# ============================================================
-
-
 @app.post("/process_memory_candidate")
-def process_memory_candidate_endpoint(
-    request: ProcessMemoryRequest,
-):
+def process_memory_candidate_endpoint(request: ProcessMemoryRequest):
 
     result = process_memory_candidate(
         text=request.text,
@@ -1381,15 +1113,8 @@ def process_memory_candidate_endpoint(
     return result
 
 
-# ============================================================
-# Memory Update Endpoint
-# ============================================================
-
-
 @app.put("/update_memory")
-def update_memory_endpoint(
-    request: MemoryUpdateRequest,
-):
+def update_memory_endpoint(request: MemoryUpdateRequest):
 
     try:
 
@@ -1413,15 +1138,8 @@ def update_memory_endpoint(
         }
 
 
-# ============================================================
-# Supersede Memory Endpoint
-# ============================================================
-
-
 @app.put("/supersede_memory")
-def supersede_memory_endpoint(
-    request: SupersedeMemoryRequest,
-):
+def supersede_memory_endpoint(request: SupersedeMemoryRequest):
 
     try:
 
@@ -1443,11 +1161,6 @@ def supersede_memory_endpoint(
         }
 
 
-# ============================================================
-# Manual Memory Endpoint
-# ============================================================
-
-
 @app.post("/store")
 def add_memory(request: MemoryRequest):
 
@@ -1466,13 +1179,15 @@ def add_memory(request: MemoryRequest):
 
 
 # ============================================================
-# Knowledge File Upload
+# Knowledge File Upload (Phase 8.3 Overlapping Chunking)
 # ============================================================
 
 
 @app.post("/add_memory_file_upload")
 async def add_memory_file_upload(
     file: UploadFile = File(...),
+    chunk_size: int = DEFAULT_CHUNK_SIZE,
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP,
 ):
 
     content = await file.read()
@@ -1506,16 +1221,23 @@ async def add_memory_file_upload(
 
         return {"error": "File is empty"}
 
-    chunks = [text[i : i + 1000] for i in range(0, len(text), 1000)]
+    # Phase 8.3 Overlapping chunking
+    chunks = chunk_text_with_overlap(
+        text=text,
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+    )
 
     stored_ids = []
 
-    for chunk_index, chunk in enumerate(chunks):
+    for item in chunks:
 
         point_id = store_knowledge(
-            text=chunk,
+            text=item["text"],
             file_name=file_name,
-            chunk_index=chunk_index,
+            chunk_index=item["chunk_index"],
+            start_char=item["start_char"],
+            end_char=item["end_char"],
         )
 
         stored_ids.append(point_id)
@@ -1524,13 +1246,15 @@ async def add_memory_file_upload(
         "status": "stored",
         "collection": KNOWLEDGE_COLLECTION,
         "file_name": file_name,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
         "chunks_stored": len(chunks),
         "ids": stored_ids,
     }
 
 
 # ============================================================
-# Search Memory Endpoint
+# Search Endpoints
 # ============================================================
 
 
@@ -1561,11 +1285,6 @@ def search_memory_endpoint(request: SearchRequest):
     }
 
 
-# ============================================================
-# Search Knowledge Endpoint
-# ============================================================
-
-
 @app.post("/search_knowledge")
 def search_knowledge_endpoint(request: SearchRequest):
 
@@ -1586,6 +1305,8 @@ def search_knowledge_endpoint(request: SearchRequest):
                 "file_name": point.payload.get("file_name"),
                 "page": point.payload.get("page"),
                 "chunk_index": point.payload.get("chunk_index"),
+                "start_char": point.payload.get("start_char"),
+                "end_char": point.payload.get("end_char"),
                 "score": float(point.score),
             }
             for point in results
@@ -1604,37 +1325,23 @@ def analyze_memory(user_message: str) -> MemoryCandidate:
 You are a memory extraction system.
 
 Your ONLY job is to analyze the user's message and determine
-whether it contains durable information about the user that
-would be useful in future conversations.
-
-DO NOT answer the user's question.
-
-DO NOT provide explanations.
-
-Return ONLY JSON.
+whether it contains durable information about the user.
 
 USER MESSAGE:
-
 {user_message}
+
+Return ONLY JSON.
 """
 
     try:
 
         response = ollama.chat(
             model=LLM_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt,
-                }
-            ],
+            messages=[{"role": "user", "content": prompt}],
             format="json",
         )
 
-        raw_content = response["message"]["content"].strip()
-
-        parsed = json.loads(raw_content)
-
+        parsed = json.loads(response["message"]["content"].strip())
         candidate = MemoryCandidate(**parsed)
 
     except Exception:
@@ -1646,43 +1353,17 @@ USER MESSAGE:
             importance=0.0,
         )
 
-    allowed_types = {
-        "preference",
-        "fact",
-        "instruction",
-    }
+    allowed_types = {"preference", "fact", "instruction"}
 
-    if not candidate.remember:
+    if (
+        not candidate.remember
+        or candidate.type not in allowed_types
+        or not candidate.text
+        or not candidate.text.strip()
+    ):
+        return MemoryCandidate(remember=False, type=None, text=None, importance=0.0)
 
-        return MemoryCandidate(
-            remember=False,
-            type=None,
-            text=None,
-            importance=0.0,
-        )
-
-    if candidate.type not in allowed_types:
-
-        return MemoryCandidate(
-            remember=False,
-            type=None,
-            text=None,
-            importance=0.0,
-        )
-
-    if not candidate.text or not candidate.text.strip():
-
-        return MemoryCandidate(
-            remember=False,
-            type=None,
-            text=None,
-            importance=0.0,
-        )
-
-    importance = max(
-        0.0,
-        min(1.0, candidate.importance),
-    )
+    importance = max(0.0, min(1.0, candidate.importance))
 
     return MemoryCandidate(
         remember=True,
@@ -1700,18 +1381,10 @@ USER MESSAGE:
 @app.post("/chat")
 def chat(request: ChatRequest):
 
-    # --------------------------------------------------------
-    # 1. Reformulate Query Using History (Phase 8.2)
-    # --------------------------------------------------------
-
     search_query = contextualize_query(
         query=request.query,
         history=request.history,
     )
-
-    # --------------------------------------------------------
-    # 2. Retrieve Memory
-    # --------------------------------------------------------
 
     memory_results = search_memory(
         query=search_query,
@@ -1720,19 +1393,11 @@ def chat(request: ChatRequest):
         use_importance_weight=True,
     )
 
-    # --------------------------------------------------------
-    # 3. Retrieve Knowledge
-    # --------------------------------------------------------
-
     knowledge_results = search_knowledge(
         query=search_query,
         limit=request.top_k,
         score_threshold=request.score_threshold,
     )
-
-    # --------------------------------------------------------
-    # 4. Build Context Blocks
-    # --------------------------------------------------------
 
     memory_context_parts = []
     for point in memory_results:
@@ -1770,14 +1435,10 @@ def chat(request: ChatRequest):
         f"{knowledge_context}\n"
     )
 
-    # --------------------------------------------------------
-    # 5. Build LLM Conversation Messages
-    # --------------------------------------------------------
-
     system_message = f"""
 You are a helpful AI assistant.
 
-Use the provided memory and knowledge when they are relevant to the user's question.
+Use the provided memory and knowledge when they are relevant.
 
 --- User Memory ---
 {memory_context}
@@ -1786,28 +1447,14 @@ Use the provided memory and knowledge when they are relevant to the user's quest
 {knowledge_context}
 
 --- End Context ---
-
-Instructions:
-- Use relevant memory when answering.
-- Use relevant knowledge when answering.
-- Do not mention the retrieval system.
-- Do not invent information.
-- If context is missing, rely on general knowledge.
-- Keep the answer concise and natural.
 """
 
     llm_messages = [{"role": "system", "content": system_message}]
 
-    # Append chat history
     for msg in request.history:
         llm_messages.append({"role": msg.role, "content": msg.content})
 
-    # Append current question
     llm_messages.append({"role": "user", "content": request.query})
-
-    # --------------------------------------------------------
-    # 6. Generate Response
-    # --------------------------------------------------------
 
     response = ollama.chat(
         model=LLM_MODEL,
@@ -1815,10 +1462,6 @@ Instructions:
     )
 
     answer = response["message"]["content"]
-
-    # --------------------------------------------------------
-    # 7. Extract Memory from Query
-    # --------------------------------------------------------
 
     memory_candidate = analyze_memory(request.query)
 
@@ -1839,10 +1482,6 @@ Instructions:
             importance=memory_candidate.importance,
             source="conversation",
         )
-
-    # --------------------------------------------------------
-    # 8. Return Response
-    # --------------------------------------------------------
 
     return {
         "response": answer,
