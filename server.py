@@ -599,6 +599,45 @@ def contextualize_query_endpoint(request: ContextualizeQueryRequest):
 
 
 # ============================================================
+# Multi-Stage Reranking (Phase 8.4)
+# ============================================================
+
+
+def rerank_knowledge_results(
+    points: list,
+    query: str,
+    limit: int,
+) -> list:
+    """
+    Phase 8.4: Multi-stage reranker for knowledge chunks.
+    Filters out near-duplicate snippets and applies a length/density bonus
+    to prioritize substantial, informative context blocks.
+    """
+    if not points:
+        return []
+
+    scored_points = []
+    seen_snippets = set()
+
+    for point in points:
+        text = point.payload.get("text", "").strip()
+
+        # Prefix snippet deduplication
+        snippet = text[:50].lower()
+        if snippet in seen_snippets:
+            continue
+        seen_snippets.add(snippet)
+
+        # Apply a mild density bonus for substantial context chunks
+        density_bonus = min(0.05, len(text) / 10000.0)
+        point.score = float(point.score) + density_bonus
+        scored_points.append(point)
+
+    scored_points.sort(key=lambda p: p.score, reverse=True)
+    return scored_points[:limit]
+
+
+# ============================================================
 # Memory Search
 # ============================================================
 
@@ -664,17 +703,25 @@ def search_knowledge(
     limit: int = 3,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
 ):
+    """
+    Search knowledge collection with Phase 8.4 multi-stage reranking.
+    """
 
     query_embedding = create_embedding(query)
 
+    # Retrieve candidate pool (limit * 2) for reranking
     results = qdrant.query_points(
         collection_name=KNOWLEDGE_COLLECTION,
         query=query_embedding,
-        limit=limit,
+        limit=limit * 2,
         score_threshold=score_threshold,
     )
 
-    return results.points
+    return rerank_knowledge_results(
+        points=results.points,
+        query=query,
+        limit=limit,
+    )
 
 
 # ============================================================
