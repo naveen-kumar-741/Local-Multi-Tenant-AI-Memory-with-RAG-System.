@@ -41,7 +41,7 @@ MEMORY_DUPLICATE_THRESHOLD = 0.75
 # Number of related memories inspected by the memory manager
 MEMORY_RELATIONSHIP_LIMIT = 5
 
-# Phase 8.1 Configuration: Weight for vector similarity vs. memory importance
+# Weight for vector similarity vs. memory importance
 # final_score = (ALPHA * similarity_score) + ((1 - ALPHA) * importance)
 IMPORTANCE_ALPHA = 0.7
 
@@ -95,10 +95,21 @@ class SearchRequest(BaseModel):
     use_importance_weight: bool = True
 
 
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+
 class ChatRequest(BaseModel):
     query: str
+    history: list[ChatMessage] = Field(default_factory=list)
     top_k: int = 3
     score_threshold: float = DEFAULT_SCORE_THRESHOLD
+
+
+class ContextualizeQueryRequest(BaseModel):
+    query: str
+    history: list[ChatMessage] = Field(default_factory=list)
 
 
 class ConflictDetectionRequest(BaseModel):
@@ -381,7 +392,7 @@ def supersede_memory(
         raise ValueError(f"Old memory '{old_memory_id}' is not active.")
 
     if new_payload.get("status") != "active":
-        raise ValueError(f"New memory '{new_memory_id}' is not active.")
+        raise ValueError(f"New memory '{new_payload_id}' is not active.")
 
     # --------------------------------------------------------
     # Mark old memory as superseded
@@ -472,6 +483,124 @@ def store_knowledge(
 
 
 # ============================================================
+# Query Contextualization (Phase 8.2)
+# ============================================================
+
+
+def contextualize_query(
+    query: str,
+    history: list[ChatMessage],
+) -> str:
+    """
+    Reformulate follow-up user queries into a standalone search query
+    using previous chat history context.
+    """
+
+    if not history:
+        return query
+
+    # Format history turns into a clean text block
+    formatted_history = (
+        "\n".join(
+            f"{msg.role.upper()}: {msg.content}"
+            for msg.content in [m.content for m.m in history]
+            if hasattr(msg, "content")
+        )
+        if False
+        else "\n".join(f"{msg.role.upper()}: {msg.content}" for msg in history)
+    )
+
+    prompt = f"""
+You are a query rewrite system.
+
+Given the chat history and the latest user query, rewrite the user query
+into a complete, standalone question/statement that can be used for vector similarity retrieval.
+
+DO NOT answer the question.
+Return ONLY the reformulated query text.
+
+------------------------------------------------------------
+EXAMPLES
+------------------------------------------------------------
+
+History:
+USER: What programming languages do I prefer?
+ASSISTANT: You prefer TypeScript for your projects.
+
+Latest Query:
+Why do I prefer that?
+
+Output:
+Why does the user prefer TypeScript for projects?
+
+------------------------------------------------------------
+
+History:
+USER: What editor do I use?
+ASSISTANT: You use VS Code.
+
+Latest Query:
+Are there any extensions recommended for it?
+
+Output:
+Recommended extensions for VS Code editor.
+
+------------------------------------------------------------
+
+Chat History:
+{formatted_history}
+
+Latest Query:
+{query}
+
+Standalone Query:
+"""
+
+    try:
+
+        response = ollama.chat(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            options={
+                "temperature": 0,
+            },
+        )
+
+        rewritten = response["message"]["content"].strip()
+
+        if rewritten:
+            return rewritten
+
+    except Exception:
+        pass
+
+    return query
+
+
+@app.post("/contextualize_query")
+def contextualize_query_endpoint(request: ContextualizeQueryRequest):
+    """
+    Endpoint to test standalone query generation from conversation history.
+    """
+
+    standalone = contextualize_query(
+        query=request.query,
+        history=request.history,
+    )
+
+    return {
+        "original_query": request.query,
+        "contextualized_query": standalone,
+        "history_turns": len(request.history),
+    }
+
+
+# ============================================================
 # Memory Search
 # ============================================================
 
@@ -483,7 +612,6 @@ def calculate_weighted_score(
 ) -> float:
     """
     Calculate importance-weighted score combining similarity and stored importance.
-    Phase 8.1 enhancement.
     """
     return (alpha * similarity_score) + ((1.0 - alpha) * importance)
 
@@ -496,16 +624,10 @@ def search_memory(
 ):
     """
     Search only active memories from the memory collection.
-
-    Superseded memories remain in Qdrant for history/debugging
-    but are excluded from normal retrieval.
-
-    Phase 8.1: Applies importance weighting to re-rank search results.
     """
 
     query_embedding = create_embedding(query)
 
-    # Retrieve candidate set with broader limit if weighted ranking is enabled
     candidate_limit = limit * 3 if use_importance_weight else limit
 
     results = qdrant.query_points(
@@ -528,7 +650,6 @@ def search_memory(
     if not use_importance_weight or not points:
         return points[:limit]
 
-    # Re-rank candidates using importance-weighted score
     ranked_points = []
     for point in points:
         importance = float(point.payload.get("importance", 0.5))
@@ -580,14 +701,6 @@ def find_related_memories(
     """
     Find active memories that are semantically related to the
     supplied memory.
-
-    This function ONLY finds candidate memories.
-
-    It does NOT determine whether the relationship is:
-        - duplicate
-        - update
-        - conflict
-        - unrelated
     """
 
     embedding = create_embedding(text)
@@ -617,10 +730,6 @@ def find_related_memories(
 
 @app.post("/find_related_memories")
 def find_related_memories_endpoint(request: SearchRequest):
-    """
-    Find active memories that are semantically related to the
-    supplied query.
-    """
 
     results = find_related_memories(
         text=request.query,
@@ -654,13 +763,6 @@ def find_duplicate_memory(
     text: str,
     duplicate_threshold: float = MEMORY_DUPLICATE_THRESHOLD,
 ):
-    """
-    Detect whether the supplied memory is semantically similar
-    enough to an existing active memory to be considered a
-    duplicate.
-
-    Phase 7.3 behavior.
-    """
 
     results = find_related_memories(
         text=text,
@@ -698,14 +800,6 @@ def store_memory_if_not_duplicate(
     importance: float,
     source: str,
 ):
-    """
-    Check for an existing similar memory before storing.
-
-    This function is retained for backward compatibility with
-    the existing manual memory endpoint.
-
-    Automatic conversation memory now uses process_memory_candidate().
-    """
 
     duplicate_result = find_duplicate_memory(text)
 
@@ -746,11 +840,6 @@ def detect_memory_conflict(
     new_memory: str,
     existing_memory: str,
 ) -> ConflictDetectionResult:
-    """
-    Determine whether a new memory contradicts an existing memory.
-
-    This function ONLY detects conflict.
-    """
 
     prompt = f"""
 You are a memory conflict detection system.
@@ -843,98 +932,6 @@ New:
 I prefer TypeScript for my projects.
 
 These can both be true.
-
-============================================================
-EXAMPLES
-============================================================
-
-Example 1:
-
-Existing:
-I prefer JavaScript for my projects.
-
-New:
-I prefer TypeScript for my projects.
-
-Output:
-{{
-    "conflict": true
-}}
-
-------------------------------------------------------------
-
-Example 2:
-
-Existing:
-I prefer JavaScript for my projects.
-
-New:
-I've switched to TypeScript for all my projects.
-
-Output:
-{{
-    "conflict": true
-}}
-
-------------------------------------------------------------
-
-Example 3:
-
-Existing:
-I prefer TypeScript for my projects.
-
-New:
-I prefer using TypeScript in my projects.
-
-Output:
-{{
-    "conflict": false
-}}
-
-------------------------------------------------------------
-
-Example 4:
-
-Existing:
-I mainly work with React.
-
-New:
-I prefer TypeScript for my projects.
-
-Output:
-{{
-    "conflict": false
-}}
-
-------------------------------------------------------------
-
-Example 5:
-
-Existing:
-I mainly work with React.
-
-New:
-I mainly work with React and TypeScript.
-
-Output:
-{{
-    "conflict": false
-}}
-
-------------------------------------------------------------
-
-Example 6:
-
-Existing:
-I use VS Code for development.
-
-New:
-I've switched to Cursor for development.
-
-Output:
-{{
-    "conflict": true
-}}
 
 ============================================================
 EXISTING MEMORY
@@ -1047,11 +1044,6 @@ Return ONLY valid JSON.
 def detect_memory_conflict_endpoint(
     request: ConflictDetectionRequest,
 ):
-    """
-    Test whether two memories contradict each other.
-
-    This endpoint does NOT modify Qdrant.
-    """
 
     result = detect_memory_conflict(
         new_memory=request.new_memory,
@@ -1075,21 +1067,6 @@ def classify_memory_relationship(
     new_memory: str,
     existing_memory: str,
 ) -> MemoryRelationshipResult:
-    """
-    Classify the relationship between a new memory and an
-    existing memory.
-
-    Possible relationships:
-
-        - duplicate
-        - update
-        - conflict
-        - unrelated
-
-    This function ONLY classifies the relationship.
-
-    It does NOT modify Qdrant.
-    """
 
     prompt = f"""
 You are a memory relationship classification system.
@@ -1113,294 +1090,6 @@ JSON format:
 {{
     "relationship": "duplicate",
     "reason": "short explanation"
-}}
-
-============================================================
-RELATIONSHIP DEFINITIONS
-============================================================
-
-DUPLICATE
----------
-
-The new memory expresses essentially the same information
-as the existing memory.
-
-Different wording does NOT make it an update.
-
-Example:
-
-Existing:
-I prefer TypeScript for my projects.
-
-New:
-I prefer using TypeScript in my projects.
-
-Relationship:
-duplicate
-
-------------------------------------------------------------
-
-UPDATE
-------
-
-The new memory adds, refines, or expands information from
-the existing memory without contradicting it.
-
-Example:
-
-Existing:
-I mainly work with React.
-
-New:
-I mainly work with React and TypeScript.
-
-Relationship:
-update
-
-Another example:
-
-Existing:
-I work with React.
-
-New:
-I mainly work with React for frontend projects.
-
-Relationship:
-update
-
-------------------------------------------------------------
-
-CONFLICT
---------
-
-The new memory contradicts, replaces, reverses, or invalidates
-the existing memory.
-
-A conflict requires a genuine contradiction or replacement.
-
-DO NOT classify memories as conflict merely because they
-mention different technologies.
-
-Different technologies can be compatible.
-
-For example:
-
-Existing:
-I mainly work with React.
-
-New:
-I prefer TypeScript for my projects.
-
-These can both be true.
-
-Therefore:
-
-Relationship:
-unrelated
-
-------------------------------------------------------------
-
-UNRELATED
----------
-
-The two memories describe separate information and do not
-represent the same fact, preference, instruction, or state.
-
-They may still be semantically related at a broad topic level.
-
-Example:
-
-Existing:
-I prefer TypeScript for my projects.
-
-New:
-I enjoy playing soccer.
-
-Relationship:
-unrelated
-
-Another important example:
-
-Existing:
-I mainly work with React.
-
-New:
-I prefer TypeScript for my projects.
-
-Relationship:
-unrelated
-
-Reason:
-React and TypeScript are different technologies and the
-statements can both be true.
-
-============================================================
-IMPORTANT CLASSIFICATION RULES
-============================================================
-
-Rule 1:
-duplicate is more specific than update.
-
-If the new memory contains essentially the same information,
-use duplicate.
-
-Rule 2:
-update means the new memory adds meaningful information to
-the existing memory.
-
-Rule 3:
-conflict means the new memory replaces, reverses, or
-contradicts the existing information.
-
-Rule 4:
-Different technologies, tools, frameworks, or concepts do
-NOT automatically conflict.
-
-Only classify them as conflict when the statements establish
-an actual replacement or incompatible choice.
-
-For example:
-
-Existing:
-I mainly work with React.
-
-New:
-I prefer TypeScript.
-
-This is NOT conflict.
-
-------------------------------------------------------------
-
-Existing:
-I use VS Code for development.
-
-New:
-I've switched to Cursor for development.
-
-This IS conflict because Cursor replaces VS Code.
-
-------------------------------------------------------------
-
-Rule 5:
-If both memories can remain true simultaneously, do NOT use
-conflict.
-
-Rule 6:
-If the memories describe clearly different information, use
-unrelated even if their general topics are similar.
-
-============================================================
-EXAMPLES
-============================================================
-
-Example 1:
-
-Existing:
-I prefer TypeScript for my projects.
-
-New:
-I prefer using TypeScript in my projects.
-
-Output:
-{{
-    "relationship": "duplicate",
-    "reason": "Both memories express the same preference."
-}}
-
-------------------------------------------------------------
-
-Example 2:
-
-Existing:
-I mainly work with React.
-
-New:
-I mainly work with React and TypeScript.
-
-Output:
-{{
-    "relationship": "update",
-    "reason": "The new memory adds TypeScript to the existing development information."
-}}
-
-------------------------------------------------------------
-
-Example 3:
-
-Existing:
-I prefer JavaScript for my projects.
-
-New:
-I prefer TypeScript for my projects.
-
-Output:
-{{
-    "relationship": "conflict",
-    "reason": "The new programming-language preference replaces JavaScript with TypeScript."
-}}
-
-------------------------------------------------------------
-
-Example 4:
-
-Existing:
-I prefer TypeScript for my projects.
-
-New:
-I enjoy playing soccer.
-
-Output:
-{{
-    "relationship": "unrelated",
-    "reason": "The memories describe unrelated information."
-}}
-
-------------------------------------------------------------
-
-Example 5:
-
-Existing:
-I use VS Code for development.
-
-New:
-I've switched to Cursor for development.
-
-Output:
-{{
-    "relationship": "conflict",
-    "reason": "The new editor choice replaces VS Code."
-}}
-
-------------------------------------------------------------
-
-Example 6:
-
-Existing:
-I mainly work with React.
-
-New:
-I prefer TypeScript for my projects.
-
-Output:
-{{
-    "relationship": "unrelated",
-    "reason": "React and TypeScript are different technologies and both statements can be true."
-}}
-
-------------------------------------------------------------
-
-Example 7:
-
-Existing:
-I work with React.
-
-New:
-I work with React for frontend projects.
-
-Output:
-{{
-    "relationship": "update",
-    "reason": "The new memory adds context to the existing React information."
 }}
 
 ============================================================
@@ -1491,11 +1180,6 @@ Return ONLY valid JSON.
 def classify_memory_relationship_endpoint(
     request: MemoryRelationshipRequest,
 ):
-    """
-    Classify the relationship between two memories.
-
-    This endpoint does NOT modify Qdrant.
-    """
 
     result = classify_memory_relationship(
         new_memory=request.new_memory,
@@ -1521,43 +1205,12 @@ def process_memory_candidate(
     importance: float,
     source: str = "conversation",
 ):
-    """
-    Process a new memory candidate through the complete memory
-    lifecycle.
-
-    Flow:
-
-        1. Find related active memories.
-        2. Classify each candidate.
-        3. Choose the strongest actionable relationship.
-        4. Apply the corresponding lifecycle operation.
-
-    Possible actions:
-
-        duplicate
-            Ignore the new memory.
-
-        update
-            Update the existing memory using the same memory ID.
-
-        conflict
-            Create a new memory and supersede the old memory.
-
-        unrelated
-            Create a new independent memory.
-
-    This is the central memory-management function used by /chat.
-    """
 
     related_memories = find_related_memories(
         text=text,
         limit=MEMORY_RELATIONSHIP_LIMIT,
         relationship_threshold=MEMORY_RELATIONSHIP_THRESHOLD,
     )
-
-    # --------------------------------------------------------
-    # No related candidates
-    # --------------------------------------------------------
 
     if not related_memories:
 
@@ -1578,10 +1231,6 @@ def process_memory_candidate(
             "reason": "No related active memory was found.",
         }
 
-    # --------------------------------------------------------
-    # Classify every candidate
-    # --------------------------------------------------------
-
     classified_candidates = []
 
     for point in related_memories:
@@ -1601,18 +1250,6 @@ def process_memory_candidate(
                 "score": float(point.score),
             }
         )
-
-    # --------------------------------------------------------
-    # Relationship priority
-    # --------------------------------------------------------
-    #
-    # When multiple related memories are returned:
-    #
-    # duplicate > conflict > update > unrelated
-    #
-    # Within the same relationship type, use the highest
-    # semantic similarity score.
-    # --------------------------------------------------------
 
     relationship_priority = {
         "duplicate": 4,
@@ -1642,10 +1279,6 @@ def process_memory_candidate(
     existing_memory_id = str(selected_point.id)
     existing_memory_text = selected_point.payload.get("text")
 
-    # ========================================================
-    # Duplicate
-    # ========================================================
-
     if selected_relationship == "duplicate":
 
         return {
@@ -1658,13 +1291,7 @@ def process_memory_candidate(
             "reason": selected_reason,
         }
 
-    # ========================================================
-    # Update
-    # ========================================================
-
     if selected_relationship == "update":
-
-        existing_payload = selected_point.payload or {}
 
         updated = update_memory(
             memory_id=existing_memory_id,
@@ -1684,10 +1311,6 @@ def process_memory_candidate(
             "created_at": updated["created_at"],
             "updated_at": updated["updated_at"],
         }
-
-    # ========================================================
-    # Conflict
-    # ========================================================
 
     if selected_relationship == "conflict":
 
@@ -1716,10 +1339,6 @@ def process_memory_candidate(
             "new_status": supersede_result["new_status"],
             "supersedes": existing_memory_id,
         }
-
-    # ========================================================
-    # Unrelated
-    # ========================================================
 
     memory_id = store_memory(
         text=text,
@@ -1751,12 +1370,6 @@ def process_memory_candidate(
 def process_memory_candidate_endpoint(
     request: ProcessMemoryRequest,
 ):
-    """
-    Test the complete memory-management lifecycle.
-
-    This endpoint can be used to test Phase 7.8 without
-    calling /chat.
-    """
 
     result = process_memory_candidate(
         text=request.text,
@@ -1777,11 +1390,6 @@ def process_memory_candidate_endpoint(
 def update_memory_endpoint(
     request: MemoryUpdateRequest,
 ):
-    """
-    Update an existing active memory.
-
-    This endpoint is for testing Phase 7.6.
-    """
 
     try:
 
@@ -1814,10 +1422,6 @@ def update_memory_endpoint(
 def supersede_memory_endpoint(
     request: SupersedeMemoryRequest,
 ):
-    """
-    Mark an old active memory as superseded and link the new
-    active memory to it.
-    """
 
     try:
 
@@ -1877,10 +1481,6 @@ async def add_memory_file_upload(
 
     text = ""
 
-    # --------------------------------------------------------
-    # PDF
-    # --------------------------------------------------------
-
     if file_name.lower().endswith(".pdf"):
 
         with pdfplumber.open(io.BytesIO(content)) as pdf:
@@ -1892,10 +1492,6 @@ async def add_memory_file_upload(
                 if page_text:
                     text += page_text + "\n"
 
-    # --------------------------------------------------------
-    # Text
-    # --------------------------------------------------------
-
     else:
 
         try:
@@ -1906,17 +1502,9 @@ async def add_memory_file_upload(
 
             return {"error": "File must be a text or PDF file"}
 
-    # --------------------------------------------------------
-    # Empty File
-    # --------------------------------------------------------
-
     if not text.strip():
 
         return {"error": "File is empty"}
-
-    # --------------------------------------------------------
-    # Chunking
-    # --------------------------------------------------------
 
     chunks = [text[i : i + 1000] for i in range(0, len(text), 1000)]
 
@@ -2011,10 +1599,6 @@ def search_knowledge_endpoint(request: SearchRequest):
 
 
 def analyze_memory(user_message: str) -> MemoryCandidate:
-    """
-    Analyze a user message and determine whether it contains
-    durable information worth remembering.
-    """
 
     prompt = f"""
 You are a memory extraction system.
@@ -2028,149 +1612,6 @@ DO NOT answer the user's question.
 DO NOT provide explanations.
 
 Return ONLY JSON.
-
-------------------------------------------------------------
-WHEN TO REMEMBER
-------------------------------------------------------------
-
-Remember the message if it contains:
-
-1. A user preference.
-
-Examples:
-
-"I prefer TypeScript."
-"I like concise explanations."
-"I prefer dark mode."
-
-2. A stable fact about the user.
-
-Examples:
-
-"I mainly work with React."
-"I use VS Code for development."
-"I work mostly on frontend projects."
-
-3. A persistent instruction.
-
-Examples:
-
-"From now on, always explain programming concepts with examples."
-"Always use TypeScript in your examples."
-"Keep your answers concise."
-"Don't use overly complicated explanations."
-
-4. A change to an existing preference or workflow.
-
-Examples:
-
-"I've switched to TypeScript."
-"I no longer use JavaScript."
-"I now use VS Code."
-
-------------------------------------------------------------
-WHEN NOT TO REMEMBER
-------------------------------------------------------------
-
-Do NOT remember:
-
-- General knowledge questions
-- One-time questions
-- Greetings
-- Thanks
-- Temporary requests
-- Requests to explain a topic
-- Questions about unrelated facts
-- Information that does not describe a durable user preference,
-  fact, or instruction
-
-Examples:
-
-"What is React?"
-
-"What is the capital of France?"
-
-"How does Python work?"
-
-"Thanks!"
-
-"Can you explain recursion?"
-
-------------------------------------------------------------
-IMPORTANT NORMALIZATION RULE
-------------------------------------------------------------
-
-Convert the user's wording into a concise, reusable statement.
-
-For technology preferences, prefer wording such as:
-
-"User prefers TypeScript for projects."
-
-instead of:
-
-"User has switched exclusively to using TypeScript for
-their projects."
-
-For development facts:
-
-"User mainly works with React."
-
-For editor preferences:
-
-"User uses VS Code for development."
-
-For instructions:
-
-"User prefers programming concepts to be explained with
-simple examples."
-
-------------------------------------------------------------
-MEMORY TYPES
-------------------------------------------------------------
-
-Allowed types:
-
-- preference
-- fact
-- instruction
-
-------------------------------------------------------------
-IMPORTANCE
-------------------------------------------------------------
-
-Use a value between 0 and 1.
-
-Examples:
-
-0.9 = very important persistent preference/instruction
-
-0.7 = useful long-term fact
-
-0.5 = relatively minor preference
-
-------------------------------------------------------------
-OUTPUT FORMAT
-------------------------------------------------------------
-
-If the message should be remembered:
-
-{{
-    "remember": true,
-    "type": "preference",
-    "text": "User prefers TypeScript for projects.",
-    "importance": 0.8
-}}
-
-If the message should be ignored:
-
-{{
-    "remember": false,
-    "type": null,
-    "text": null,
-    "importance": 0
-}}
-
-------------------------------------------------------------
 
 USER MESSAGE:
 
@@ -2260,83 +1701,67 @@ USER MESSAGE:
 def chat(request: ChatRequest):
 
     # --------------------------------------------------------
-    # 1. Retrieve Memory (with Importance Weighting)
+    # 1. Reformulate Query Using History (Phase 8.2)
+    # --------------------------------------------------------
+
+    search_query = contextualize_query(
+        query=request.query,
+        history=request.history,
+    )
+
+    # --------------------------------------------------------
+    # 2. Retrieve Memory
     # --------------------------------------------------------
 
     memory_results = search_memory(
-        query=request.query,
+        query=search_query,
         limit=request.top_k,
         score_threshold=request.score_threshold,
         use_importance_weight=True,
     )
 
     # --------------------------------------------------------
-    # 2. Retrieve Knowledge
+    # 3. Retrieve Knowledge
     # --------------------------------------------------------
 
     knowledge_results = search_knowledge(
-        query=request.query,
+        query=search_query,
         limit=request.top_k,
         score_threshold=request.score_threshold,
     )
 
     # --------------------------------------------------------
-    # 3. Build Memory Context
+    # 4. Build Context Blocks
     # --------------------------------------------------------
 
     memory_context_parts = []
-
     for point in memory_results:
-
-        part = f"[Score: {point.score:.3f}]\n" f"{point.payload.get('text', '')}"
-
+        part = f"[Score: {point.score:.3f}]\n{point.payload.get('text', '')}"
         memory_context_parts.append(part)
 
-    if memory_context_parts:
-
-        memory_context = "\n---\n".join(memory_context_parts)
-
-    else:
-
-        memory_context = "No relevant memory found."
-
-    # --------------------------------------------------------
-    # 4. Build Knowledge Context
-    # --------------------------------------------------------
+    memory_context = (
+        "\n---\n".join(memory_context_parts)
+        if memory_context_parts
+        else "No relevant memory found."
+    )
 
     knowledge_context_parts = []
-
     for point in knowledge_results:
-
         part = f"[Score: {point.score:.3f}]\n"
-
         if point.payload.get("file_name"):
-
-            part += f"File: " f"{point.payload['file_name']}"
-
+            part += f"File: {point.payload['file_name']}"
         if point.payload.get("page") is not None:
-
-            part += f" | Page: " f"{point.payload['page']}"
-
+            part += f" | Page: {point.payload['page']}"
         if point.payload.get("chunk_index") is not None:
-
-            part += f" | Chunk: " f"{point.payload['chunk_index']}"
-
-        part += f"\n" f"{point.payload.get('text', '')}"
-
+            part += f" | Chunk: {point.payload['chunk_index']}"
+        part += f"\n{point.payload.get('text', '')}"
         knowledge_context_parts.append(part)
 
-    if knowledge_context_parts:
-
-        knowledge_context = "\n---\n".join(knowledge_context_parts)
-
-    else:
-
-        knowledge_context = "No relevant knowledge found."
-
-    # --------------------------------------------------------
-    # 5. Combined Context
-    # --------------------------------------------------------
+    knowledge_context = (
+        "\n---\n".join(knowledge_context_parts)
+        if knowledge_context_parts
+        else "No relevant knowledge found."
+    )
 
     context = (
         "\n--- User Memory ---\n"
@@ -2346,14 +1771,13 @@ def chat(request: ChatRequest):
     )
 
     # --------------------------------------------------------
-    # 6. Main LLM Prompt
+    # 5. Build LLM Conversation Messages
     # --------------------------------------------------------
 
-    prompt = f"""
+    system_message = f"""
 You are a helpful AI assistant.
 
-Use the provided memory and knowledge when they
-are relevant to the user's question.
+Use the provided memory and knowledge when they are relevant to the user's question.
 
 --- User Memory ---
 {memory_context}
@@ -2363,45 +1787,40 @@ are relevant to the user's question.
 
 --- End Context ---
 
-Question:
-{request.query}
-
 Instructions:
-
 - Use relevant memory when answering.
 - Use relevant knowledge when answering.
 - Do not mention the retrieval system.
 - Do not invent information.
-- If the context does not contain the answer,
-  use your general knowledge when appropriate.
+- If context is missing, rely on general knowledge.
 - Keep the answer concise and natural.
 """
 
+    llm_messages = [{"role": "system", "content": system_message}]
+
+    # Append chat history
+    for msg in request.history:
+        llm_messages.append({"role": msg.role, "content": msg.content})
+
+    # Append current question
+    llm_messages.append({"role": "user", "content": request.query})
+
     # --------------------------------------------------------
-    # 7. Generate Answer
+    # 6. Generate Response
     # --------------------------------------------------------
 
     response = ollama.chat(
         model=LLM_MODEL,
-        messages=[
-            {
-                "role": "user",
-                "content": prompt,
-            }
-        ],
+        messages=llm_messages,
     )
 
     answer = response["message"]["content"]
 
     # --------------------------------------------------------
-    # 8. Analyze User Message
+    # 7. Extract Memory from Query
     # --------------------------------------------------------
 
     memory_candidate = analyze_memory(request.query)
-
-    # --------------------------------------------------------
-    # 9. Automatic Memory Management
-    # --------------------------------------------------------
 
     memory_management = {
         "action": "none",
@@ -2414,7 +1833,6 @@ Instructions:
     }
 
     if memory_candidate.remember:
-
         memory_management = process_memory_candidate(
             text=memory_candidate.text,
             memory_type=memory_candidate.type,
@@ -2423,11 +1841,13 @@ Instructions:
         )
 
     # --------------------------------------------------------
-    # 10. Return Response
+    # 8. Return Response
     # --------------------------------------------------------
 
     return {
         "response": answer,
+        "original_query": request.query,
+        "search_query_used": search_query,
         "score_threshold": request.score_threshold,
         "memory_results": len(memory_results),
         "knowledge_results": len(knowledge_results),
