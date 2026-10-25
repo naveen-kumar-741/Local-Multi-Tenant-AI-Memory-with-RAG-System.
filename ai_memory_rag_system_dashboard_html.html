@@ -1,0 +1,886 @@
+<!DOCTYPE html>
+<html lang="en" class="dark h-full bg-slate-950 text-slate-100">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Memory + RAG System Dashboard</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Lucide Icons -->
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: {
+              50: '#eef2ff',
+              100: '#e0e7ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              700: '#4338ca',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    /* Custom scrollbar for sleek dark look */
+    ::-webkit-scrollbar {
+      width: 6px;
+      height: 6px;
+    }
+    ::-webkit-scrollbar-track {
+      background: #0f172a;
+    }
+    ::-webkit-scrollbar-thumb {
+      background: #334155;
+      border-radius: 4px;
+    }
+    ::-webkit-scrollbar-thumb:hover {
+      background: #475569;
+    }
+  </style>
+</head>
+<body class="h-full flex flex-col font-sans antialiased selection:bg-brand-500 selection:text-white">
+
+  <!-- ========================================== -->
+  <!-- Top Bar: Global API Configuration -->
+  <!-- ========================================== -->
+  <header class="bg-slate-900 border-b border-slate-800 px-4 py-3 shrink-0 shadow-md">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="p-2 bg-brand-600/20 text-brand-400 rounded-lg border border-brand-500/30">
+          <i data-lucide="brain-circuit" class="w-6 h-6"></i>
+        </div>
+        <div>
+          <h1 class="text-base font-bold text-white tracking-wide flex items-center gap-2">
+            AI Memory + RAG
+            <span class="text-xs font-normal px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">Phase 10 Hardened</span>
+          </h1>
+          <p class="text-xs text-slate-400">Interactive System Testbench & Context Inspector</p>
+        </div>
+      </div>
+
+      <!-- Config Controls -->
+      <div class="flex flex-wrap items-center gap-3 text-xs">
+        <div class="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800">
+          <i data-lucide="server" class="w-3.5 h-3.5 text-slate-400"></i>
+          <span class="text-slate-400">API:</span>
+          <input type="text" id="apiBaseUrl" value="http://localhost:8000" class="bg-transparent border-none text-slate-200 focus:outline-none w-44 font-mono text-xs" />
+        </div>
+
+        <div class="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800">
+          <i data-lucide="user" class="w-3.5 h-3.5 text-slate-400"></i>
+          <span class="text-slate-400">User:</span>
+          <input type="text" id="globalUserId" value="alice" class="bg-transparent border-none text-slate-200 focus:outline-none w-20 font-mono text-xs" />
+        </div>
+
+        <div class="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-lg border border-slate-800">
+          <i data-lucide="hash" class="w-3.5 h-3.5 text-slate-400"></i>
+          <span class="text-slate-400">Session:</span>
+          <input type="text" id="globalSessionId" value="session_001" class="bg-transparent border-none text-slate-200 focus:outline-none w-24 font-mono text-xs" />
+        </div>
+
+        <button id="btnHealthCheck" onclick="checkApiHealth()" class="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 transition-colors border border-slate-700">
+          <span id="statusIndicator" class="w-2 h-2 rounded-full bg-amber-400 animate-pulse"></span>
+          <span id="statusText">Ping API</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ========================================== -->
+  <!-- Navigation Tabs -->
+  <!-- ========================================== -->
+  <nav class="bg-slate-900/60 border-b border-slate-800 px-4 shrink-0">
+    <div class="max-w-7xl mx-auto flex space-x-2 overflow-x-auto text-sm">
+      <button onclick="switchTab('chat')" id="tab-btn-chat" class="tab-btn flex items-center gap-2 py-3 px-4 font-medium border-b-2 border-brand-500 text-brand-400 transition-colors">
+        <i data-lucide="message-square" class="w-4 h-4"></i> Chat & RAG Assistant
+      </button>
+      <button onclick="switchTab('memory')" id="tab-btn-memory" class="tab-btn flex items-center gap-2 py-3 px-4 font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 transition-colors">
+        <i data-lucide="database" class="w-4 h-4"></i> Memory Management
+      </button>
+      <button onclick="switchTab('knowledge')" id="tab-btn-knowledge" class="tab-btn flex items-center gap-2 py-3 px-4 font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 transition-colors">
+        <i data-lucide="file-text" class="w-4 h-4"></i> Knowledge Base
+      </button>
+      <button onclick="switchTab('contextualize')" id="tab-btn-contextualize" class="tab-btn flex items-center gap-2 py-3 px-4 font-medium border-b-2 border-transparent text-slate-400 hover:text-slate-200 transition-colors">
+        <i data-lucide="wand-2" class="w-4 h-4"></i> Query Contextualizer
+      </button>
+    </div>
+  </nav>
+
+  <!-- ========================================== -->
+  <!-- Main Content Panels Container -->
+  <!-- ========================================== -->
+  <main class="flex-1 overflow-hidden relative max-w-7xl w-full mx-auto p-4">
+
+    <!-- 1. CHAT & ASSISTANT TAB -->
+    <div id="tab-chat" class="tab-content h-full flex flex-col md:flex-row gap-4">
+      
+      <!-- Left: Chat Stream -->
+      <div class="flex-1 bg-slate-900 border border-slate-800 rounded-xl flex flex-col overflow-hidden shadow-lg">
+        <div class="p-3 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between">
+          <div class="flex items-center gap-2 text-xs font-semibold text-slate-300">
+            <i data-lucide="bot" class="w-4 h-4 text-brand-400"></i> Active Conversation
+          </div>
+          <button onclick="clearChatHistory()" class="text-xs text-slate-400 hover:text-rose-400 flex items-center gap-1 transition-colors">
+            <i data-lucide="trash-2" class="w-3.5 h-3.5"></i> Clear Stream
+          </button>
+        </div>
+
+        <!-- Messages Container -->
+        <div id="chatMessages" class="flex-1 p-4 overflow-y-auto space-y-4 text-sm">
+          <div class="flex gap-3 text-slate-400 italic text-xs justify-center py-4">
+            Start talking to test real-time RAG context retrieval and background memory processing!
+          </div>
+        </div>
+
+        <!-- Chat Input Form -->
+        <form onsubmit="handleChatSubmit(event)" class="p-3 bg-slate-950 border-t border-slate-800 flex items-center gap-2">
+          <input type="text" id="chatInput" placeholder="Type a message (e.g., 'I prefer Python for backend')..." required class="flex-1 bg-slate-900 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-100 placeholder-slate-500 focus:outline-none focus:border-brand-500" />
+          <button type="submit" id="btnSendChat" class="bg-brand-600 hover:bg-brand-500 text-white px-4 py-2 rounded-lg text-xs font-medium flex items-center gap-1 transition-colors shrink-0">
+            <span>Send</span>
+            <i data-lucide="send" class="w-3.5 h-3.5"></i>
+          </button>
+        </form>
+      </div>
+
+      <!-- Right: Live Context & Inspector -->
+      <div class="w-full md:w-96 bg-slate-900 border border-slate-800 rounded-xl flex flex-col overflow-hidden shadow-lg shrink-0">
+        <div class="p-3 bg-slate-900/80 border-b border-slate-800 flex items-center justify-between">
+          <span class="text-xs font-semibold text-slate-300 flex items-center gap-1.5">
+            <i data-lucide="eye" class="w-4 h-4 text-amber-400"></i> Context & Memory Inspector
+          </span>
+          <span class="text-[10px] bg-slate-800 text-slate-400 px-2 py-0.5 rounded">Last Turn</span>
+        </div>
+
+        <div class="flex-1 overflow-y-auto p-3 space-y-3 text-xs">
+          <!-- Rewritten Query -->
+          <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+            <span class="text-[10px] uppercase font-bold text-slate-400 block mb-1">Contextualized Search Query</span>
+            <p id="inspectorSearchQuery" class="font-mono text-brand-300 break-words">-- None --</p>
+          </div>
+
+          <!-- Retrieved User Memory -->
+          <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-[10px] uppercase font-bold text-slate-400">Retrieved User Memories</span>
+              <span id="inspectorMemCount" class="text-[10px] px-1.5 rounded bg-brand-500/10 text-brand-400 font-mono">0</span>
+            </div>
+            <div id="inspectorMemList" class="space-y-1.5 text-slate-300 font-mono text-[11px]">
+              <span class="text-slate-500 italic">No memory pulled</span>
+            </div>
+          </div>
+
+          <!-- Retrieved Knowledge -->
+          <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+            <div class="flex justify-between items-center mb-1">
+              <span class="text-[10px] uppercase font-bold text-slate-400">Retrieved Knowledge Base</span>
+              <span id="inspectorKnowCount" class="text-[10px] px-1.5 rounded bg-cyan-500/10 text-cyan-400 font-mono">0</span>
+            </div>
+            <div id="inspectorKnowList" class="space-y-1.5 text-slate-300 font-mono text-[11px]">
+              <span class="text-slate-500 italic">No knowledge pulled</span>
+            </div>
+          </div>
+
+          <!-- Memory Extraction Status -->
+          <div class="bg-slate-950 p-2.5 rounded-lg border border-slate-800">
+            <span class="text-[10px] uppercase font-bold text-slate-400 block mb-1">Background Memory Extraction</span>
+            <div id="inspectorMemCandidate" class="p-2 rounded bg-slate-900 border border-slate-800 text-[11px] text-slate-400 font-mono">
+              Awaiting conversation input...
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- 2. MEMORY MANAGEMENT TAB -->
+    <div id="tab-memory" class="tab-content hidden h-full overflow-y-auto space-y-4 pr-1">
+      
+      <!-- Top Grid: Store & Relationship Tester -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        
+        <!-- Store / Add Memory Card -->
+        <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300 mb-3 flex items-center gap-2">
+            <i data-lucide="plus-circle" class="w-4 h-4 text-brand-400"></i> Store Memory
+          </h2>
+          <form onsubmit="handleManualStore(event)" class="space-y-3">
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">Memory Statement</label>
+              <textarea id="storeText" rows="2" placeholder="e.g., I prefer using FastAPI over Flask." required class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500 font-mono"></textarea>
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-1">Type</label>
+                <select id="storeType" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 focus:outline-none focus:border-brand-500">
+                  <option value="fact">fact</option>
+                  <option value="preference">preference</option>
+                  <option value="instruction">instruction</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-[11px] text-slate-400 mb-1">Importance (<span id="impValDisplay">0.5</span>)</label>
+                <input type="range" id="storeImportance" min="0.0" max="1.0" step="0.1" value="0.5" oninput="document.getElementById('impValDisplay').innerText = this.value" class="w-full accent-brand-500" />
+              </div>
+            </div>
+            <button type="submit" class="w-full bg-brand-600 hover:bg-brand-500 text-white py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1">
+              <i data-lucide="save" class="w-3.5 h-3.5"></i> Store via /store
+            </button>
+          </form>
+        </div>
+
+        <!-- Relationship & Conflict Inspector -->
+        <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300 mb-3 flex items-center gap-2">
+            <i data-lucide="git-compare" class="w-4 h-4 text-amber-400"></i> Relationship & Conflict Classifier
+          </h2>
+          <div class="space-y-2 text-xs">
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">Existing Memory</label>
+              <input type="text" id="classExisting" placeholder="I prefer Python" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-mono" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">New Memory Candidate</label>
+              <input type="text" id="classNew" placeholder="I now prefer TypeScript" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-mono" />
+            </div>
+            <div class="flex gap-2 pt-1">
+              <button onclick="testConflict()" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded-lg border border-slate-700 text-xs">Test Conflict</button>
+              <button onclick="testRelationship()" class="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-200 py-1.5 rounded-lg border border-slate-700 text-xs">Classify Relation</button>
+            </div>
+            <div id="classResult" class="mt-2 p-2 rounded bg-slate-950 border border-slate-800 text-[11px] text-slate-400 font-mono whitespace-pre-wrap">
+              Results will display here...
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Search Memory & Active Items Grid -->
+      <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <i data-lucide="search" class="w-4 h-4 text-emerald-400"></i> Query Memory Vector Store
+          </h2>
+          <div class="flex items-center gap-3 text-xs">
+            <label class="flex items-center gap-1.5 text-slate-400">
+              <span>Importance Weight:</span>
+              <input type="checkbox" id="memSearchWeight" checked class="accent-brand-500 rounded" />
+            </label>
+            <div class="flex items-center gap-1 text-slate-400">
+              <span>Threshold:</span>
+              <input type="number" id="memSearchThresh" value="0.3" step="0.05" class="w-14 bg-slate-950 border border-slate-800 rounded px-1.5 py-0.5 text-slate-200" />
+            </div>
+          </div>
+        </div>
+
+        <form onsubmit="handleSearchMemory(event)" class="flex gap-2">
+          <input type="text" id="memSearchQuery" placeholder="Search memories (e.g., programming preferences)..." required class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 font-mono" />
+          <button type="submit" class="bg-emerald-600 hover:bg-emerald-500 text-white px-4 py-2 rounded-lg text-xs font-medium transition-colors flex items-center gap-1">
+            <i data-lucide="search" class="w-3.5 h-3.5"></i> Search
+          </button>
+        </form>
+
+        <!-- Memory Items List / Grid -->
+        <div id="memoryResultsList" class="space-y-2 text-xs">
+          <div class="text-center py-6 text-slate-500">Run a search above to inspect active user memories in Qdrant.</div>
+        </div>
+      </div>
+
+    </div>
+
+
+    <!-- 3. KNOWLEDGE BASE TAB -->
+    <div id="tab-knowledge" class="tab-content hidden h-full overflow-y-auto space-y-4 pr-1">
+      
+      <!-- Upload Dropzone & Settings -->
+      <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300 mb-3 flex items-center gap-2">
+          <i data-lucide="upload-cloud" class="w-4 h-4 text-cyan-400"></i> Upload Document to Knowledge Base
+        </h2>
+        
+        <form onsubmit="handleFileUpload(event)" class="space-y-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">Chunk Size (chars)</label>
+              <input type="number" id="uploadChunkSize" value="1000" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200" />
+            </div>
+            <div>
+              <label class="block text-[11px] text-slate-400 mb-1">Chunk Overlap (chars)</label>
+              <input type="number" id="uploadChunkOverlap" value="200" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200" />
+            </div>
+          </div>
+
+          <div class="border-2 border-dashed border-slate-800 hover:border-cyan-500/50 rounded-xl p-4 text-center bg-slate-950/50 transition-colors">
+            <input type="file" id="knowledgeFile" accept=".txt,.pdf" required class="hidden" onchange="updateFileName(this)" />
+            <label for="knowledgeFile" class="cursor-pointer flex flex-col items-center justify-center space-y-1">
+              <i data-lucide="file-plus" class="w-8 h-8 text-slate-500"></i>
+              <span id="fileNameDisplay" class="text-xs text-slate-300 font-medium">Click to select a file (.txt or .pdf)</span>
+              <span class="text-[10px] text-slate-500">Will be chunked and indexed into 'knowledge' collection</span>
+            </label>
+          </div>
+
+          <button type="submit" id="btnUpload" class="w-full bg-cyan-600 hover:bg-cyan-500 text-white py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1">
+            <i data-lucide="file-up" class="w-3.5 h-3.5"></i> Process & Index Document
+          </button>
+        </form>
+      </div>
+
+      <!-- Knowledge Search Tester -->
+      <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md space-y-4">
+        <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+          <i data-lucide="book-open" class="w-4 h-4 text-cyan-400"></i> Search Reranked Knowledge Base
+        </h2>
+
+        <form onsubmit="handleSearchKnowledge(event)" class="flex gap-2">
+          <input type="text" id="knowSearchQuery" placeholder="Search ingested files & documents..." required class="flex-1 bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-xs text-slate-200 font-mono" />
+          <button type="submit" class="bg-cyan-600 hover:bg-cyan-500 text-white px-4 py-2 rounded-lg text-xs font-medium transition-colors flex items-center gap-1">
+            <i data-lucide="search" class="w-3.5 h-3.5"></i> Search
+          </button>
+        </form>
+
+        <!-- Knowledge Chunk Results -->
+        <div id="knowledgeResultsList" class="space-y-2 text-xs">
+          <div class="text-center py-6 text-slate-500">Search to view reranked document chunks from Qdrant.</div>
+        </div>
+      </div>
+
+    </div>
+
+
+    <!-- 4. CONTEXTUALIZE QUERY TESTER TAB -->
+    <div id="tab-contextualize" class="tab-content hidden h-full overflow-y-auto space-y-4 pr-1">
+      <div class="bg-slate-900 p-4 rounded-xl border border-slate-800 shadow-md max-w-3xl mx-auto space-y-4">
+        <div>
+          <h2 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+            <i data-lucide="wand-2" class="w-4 h-4 text-brand-400"></i> Test Query Reformulation Engine
+          </h2>
+          <p class="text-xs text-slate-400 mt-1">
+            Test how the system transforms vague or follow-up queries (e.g. "What about Python?") into standalone queries using chat history.
+          </p>
+        </div>
+
+        <form onsubmit="handleContextualizeTest(event)" class="space-y-3">
+          <div>
+            <label class="block text-[11px] text-slate-400 mb-1">Simulated Recent Chat History (JSON Format)</label>
+            <textarea id="contextHistoryJson" rows="5" class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-mono focus:outline-none focus:border-brand-500">[
+  {"role": "user", "content": "I am working on a new backend service."},
+  {"role": "assistant", "content": "Great! Which programming language do you plan to use?"}
+]</textarea>
+          </div>
+
+          <div>
+            <label class="block text-[11px] text-slate-400 mb-1">Latest Ambiguous Follow-up Query</label>
+            <input type="text" id="contextRawQuery" value="I prefer Python for it." required class="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-xs text-slate-200 font-mono" />
+          </div>
+
+          <button type="submit" class="w-full bg-brand-600 hover:bg-brand-500 text-white py-2 rounded-lg text-xs font-medium transition-colors flex items-center justify-center gap-1">
+            <i data-lucide="play" class="w-3.5 h-3.5"></i> Run Contextualization
+          </button>
+        </form>
+
+        <div class="p-3 bg-slate-950 rounded-lg border border-slate-800">
+          <span class="text-[10px] uppercase font-bold text-slate-400 block mb-1">Reformulated Standalone Output</span>
+          <div id="contextualizedResult" class="font-mono text-xs text-brand-300 whitespace-pre-wrap">-- Click run to test --</div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <!-- ========================================== -->
+  <!-- JavaScript Logic & API Handlers -->
+  <!-- ========================================== -->
+  <script>
+    // State variables
+    let chatHistory = [];
+
+    // Helper: Get global headers & base URL
+    function getApiUrl(path) {
+      const baseUrl = document.getElementById('apiBaseUrl').value.replace(/\/+$/, '');
+      return `${baseUrl}${path}`;
+    }
+
+    function getGlobalUserId() {
+      return document.getElementById('globalUserId').value.trim() || 'alice';
+    }
+
+    function getGlobalSessionId() {
+      return document.getElementById('globalSessionId').value.trim() || null;
+    }
+
+    // Health check on startup
+    window.addEventListener('DOMContentLoaded', () => {
+      lucide.createIcons();
+      checkApiHealth();
+    });
+
+    async function checkApiHealth() {
+      const statusInd = document.getElementById('statusIndicator');
+      const statusTxt = document.getElementById('statusText');
+      try {
+        statusTxt.innerText = "Checking...";
+        const res = await fetch(getApiUrl('/contextualize_query'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: "ping", history: [] })
+        });
+        if (res.ok) {
+          statusInd.className = "w-2 h-2 rounded-full bg-emerald-500";
+          statusTxt.innerText = "Connected";
+        } else {
+          throw new Error();
+        }
+      } catch (err) {
+        statusInd.className = "w-2 h-2 rounded-full bg-rose-500";
+        statusTxt.innerText = "Offline / Error";
+      }
+    }
+
+    // Tab Switcher
+    function switchTab(tabName) {
+      document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
+      document.querySelectorAll('.tab-btn').forEach(el => {
+        el.classList.remove('border-brand-500', 'text-brand-400');
+        el.classList.add('border-transparent', 'text-slate-400');
+      });
+
+      document.getElementById(`tab-${tabName}`).classList.remove('hidden');
+      const activeBtn = document.getElementById(`tab-btn-${tabName}`);
+      activeBtn.classList.remove('border-transparent', 'text-slate-400');
+      activeBtn.classList.add('border-brand-500', 'text-brand-400');
+    }
+
+    // ----------------------------------------------------
+    // 1. CHAT & ASSISTANT HANDLERS (STREAMING SSE ENABLED)
+    // ----------------------------------------------------
+    async function handleChatSubmit(e) {
+      e.preventDefault();
+      const inputEl = document.getElementById('chatInput');
+      const query = inputEl.value.trim();
+      if (!query) return;
+
+      // Add user message to UI
+      appendChatMessage('user', query);
+      inputEl.value = '';
+
+      const btnSend = document.getElementById('btnSendChat');
+      inputEl.disabled = true;
+      btnSend.disabled = true;
+
+      // Create assistant container with empty text & blinking cursor
+      const assistantMsgContainer = createAssistantMessageDiv();
+      const textContentEl = assistantMsgContainer.querySelector('.chat-text-content');
+      
+      const cursorSpan = document.createElement('span');
+      cursorSpan.className = "inline-block w-1.5 h-3.5 bg-brand-400 ml-1 align-middle animate-pulse";
+      textContentEl.appendChild(cursorSpan);
+
+      let fullResponseText = "";
+
+      try {
+        const payload = {
+          query: query,
+          history: chatHistory,
+          top_k: 2,
+          score_threshold: 0.55,
+          user_id: getGlobalUserId(),
+          session_id: getGlobalSessionId()
+        };
+
+        const res = await fetch(getApiUrl('/chat/stream'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (!res.ok) throw new Error(`API Error: ${res.statusText}`);
+
+        // Read stream token by token
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder('utf-8');
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value, { stream: true });
+          fullResponseText += chunk;
+
+          textContentEl.textContent = fullResponseText;
+          textContentEl.appendChild(cursorSpan);
+
+          const chatMessagesBox = document.getElementById('chatMessages');
+          chatMessagesBox.scrollTop = chatMessagesBox.scrollHeight;
+        }
+
+        // Remove cursor when finished
+        cursorSpan.remove();
+
+        // Append turn to history
+        chatHistory.push({ role: 'user', content: query });
+        chatHistory.push({ role: 'assistant', content: fullResponseText });
+
+        // Update Context Inspector
+        updateInspectorPane({
+          search_query_used: query,
+          user_id: getGlobalUserId()
+        });
+
+      } catch (err) {
+        if (cursorSpan) cursorSpan.remove();
+        textContentEl.textContent = `Error: ${err.message}`;
+      } finally {
+        inputEl.disabled = false;
+        btnSend.disabled = false;
+        inputEl.focus();
+        lucide.createIcons();
+      }
+    }
+
+    function createAssistantMessageDiv() {
+      const container = document.getElementById('chatMessages');
+      const msgDiv = document.createElement('div');
+      msgDiv.className = "flex justify-start gap-2.5";
+      msgDiv.innerHTML = `
+        <div class="w-6 h-6 rounded-lg bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400 shrink-0 mt-0.5">
+          <i data-lucide="bot" class="w-3.5 h-3.5"></i>
+        </div>
+        <div class="bg-slate-800 border border-slate-700/60 text-slate-100 rounded-xl rounded-tl-none px-3.5 py-2 max-w-[80%] font-sans">
+          <span class="chat-text-content whitespace-pre-wrap"></span>
+        </div>
+      `;
+      container.appendChild(msgDiv);
+      container.scrollTop = container.scrollHeight;
+      lucide.createIcons();
+      return msgDiv;
+    }
+
+    function appendChatMessage(role, content) {
+  const container = document.getElementById('chatMessages');
+  const msgDiv = document.createElement('div');
+  
+  // Trim the content string to strip accidental leading/trailing spaces or newlines
+  const cleanContent = escapeHtml((content || '').trim());
+  
+  if (role === 'user') {
+    msgDiv.className = "flex justify-end";
+    // Keep template content tight without extra spaces or linebreaks
+    msgDiv.innerHTML = `<div class="bg-brand-600 text-white rounded-xl rounded-tr-none px-3.5 py-2 max-w-[80%] font-sans whitespace-pre-wrap break-words">${cleanContent}</div>`;
+  } else if (role === 'assistant') {
+    msgDiv.className = "flex justify-start gap-2.5";
+    msgDiv.innerHTML = `<div class="w-6 h-6 rounded-lg bg-brand-500/20 border border-brand-500/30 flex items-center justify-center text-brand-400 shrink-0 mt-0.5"><i data-lucide="bot" class="w-3.5 h-3.5"></i></div><div class="assistant-content bg-slate-800 border border-slate-700/60 text-slate-100 rounded-xl rounded-tl-none px-3.5 py-2 max-w-[80%] font-sans whitespace-pre-wrap break-words">${cleanContent}</div>`;
+  } else {
+    msgDiv.className = "flex justify-center";
+    msgDiv.innerHTML = `<div class="bg-rose-500/10 border border-rose-500/20 text-rose-400 rounded-lg px-3 py-1 text-xs font-mono">${cleanContent}</div>`;
+  }
+
+  container.appendChild(msgDiv);
+  container.scrollTop = container.scrollHeight;
+  lucide.createIcons();
+  
+  // Return message element reference if needed for streaming
+  return msgDiv.querySelector('.assistant-content') || msgDiv;
+}
+    function clearChatHistory() {
+      chatHistory = [];
+      document.getElementById('chatMessages').innerHTML = `
+        <div class="flex gap-3 text-slate-400 italic text-xs justify-center py-4">
+          Chat cleared. Type a message to begin again.
+        </div>
+      `;
+    }
+
+    function updateInspectorPane(data) {
+      document.getElementById('inspectorSearchQuery').innerText = data.search_query_used || '--';
+      document.getElementById('inspectorMemCandidate').innerText = `Turn executed for ${data.user_id}. Auto-extraction & consolidation ran in backend via BackgroundTasks.`;
+    }
+
+    // ----------------------------------------------------
+    // 2. MEMORY MANAGEMENT HANDLERS
+    // ----------------------------------------------------
+    async function handleManualStore(e) {
+      e.preventDefault();
+      const text = document.getElementById('storeText').value.trim();
+      const type = document.getElementById('storeType').value;
+      const importance = parseFloat(document.getElementById('storeImportance').value);
+
+      try {
+        const res = await fetch(getApiUrl('/store'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text,
+            user_id: getGlobalUserId(),
+            session_id: getGlobalSessionId()
+          })
+        });
+        const data = await res.json();
+        alert(`Memory Store Status: ${JSON.stringify(data, null, 2)}`);
+        document.getElementById('storeText').value = '';
+      } catch (err) {
+        alert(`Store failed: ${err.message}`);
+      }
+    }
+
+    async function handleSearchMemory(e) {
+      e.preventDefault();
+      const query = document.getElementById('memSearchQuery').value.trim();
+      const thresh = parseFloat(document.getElementById('memSearchThresh').value);
+      const weight = document.getElementById('memSearchWeight').checked;
+
+      try {
+        const res = await fetch(getApiUrl('/search_memory'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: query,
+            limit: 5,
+            score_threshold: thresh,
+            use_importance_weight: weight,
+            user_id: getGlobalUserId()
+          })
+        });
+
+        const data = await res.json();
+        renderMemoryResults(data.results || []);
+      } catch (err) {
+        alert(`Search error: ${err.message}`);
+      }
+    }
+
+    function renderMemoryResults(results) {
+      const listEl = document.getElementById('memoryResultsList');
+      if (!results.length) {
+        listEl.innerHTML = `<div class="p-4 text-center text-slate-500">No active memories found matching criteria.</div>`;
+        return;
+      }
+
+      listEl.innerHTML = results.map(item => `
+        <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-2">
+          <div class="space-y-1">
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-slate-200 text-xs">${escapeHtml(item.text)}</span>
+              <span class="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 font-mono">Score: ${item.score.toFixed(3)}</span>
+            </div>
+            <div class="text-[10px] font-mono text-slate-500">ID: ${item.id}</div>
+          </div>
+          <div class="flex items-center gap-2 shrink-0">
+            <button onclick="promptUpdateMemory('${item.id}', '${escapeHtml(item.text)}')" class="px-2 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px] transition-colors">Update</button>
+            <button onclick="promptSupersedeMemory('${item.id}')" class="px-2 py-1 bg-rose-950/40 hover:bg-rose-900/50 text-rose-300 border border-rose-800/40 rounded text-[10px] transition-colors">Supersede</button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    async function promptUpdateMemory(id, currentText) {
+      const newText = prompt("Update Memory Text:", currentText);
+      if (!newText || newText === currentText) return;
+
+      try {
+        const res = await fetch(getApiUrl('/update_memory'), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            memory_id: id,
+            text: newText,
+            memory_type: "fact",
+            importance: 0.5
+          })
+        });
+        const data = await res.json();
+        alert(`Update Result: ${data.status}`);
+      } catch (err) {
+        alert(`Update failed: ${err.message}`);
+      }
+    }
+
+    async function promptSupersedeMemory(oldId) {
+      const newMemoryText = prompt("Enter replacement memory text to supersede old one:");
+      if (!newMemoryText) return;
+
+      try {
+        // Step 1: Store new memory
+        const storeRes = await fetch(getApiUrl('/store'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            text: newMemoryText,
+            user_id: getGlobalUserId()
+          })
+        });
+        const storeData = await storeRes.json();
+        if (!storeData.memory_id) throw new Error("Failed to store replacement memory");
+
+        // Step 2: Supersede
+        const supRes = await fetch(getApiUrl('/supersede_memory'), {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            old_memory_id: oldId,
+            new_memory_id: storeData.memory_id
+          })
+        });
+        const supData = await supRes.json();
+        alert(`Superseded Status: ${supData.status}`);
+      } catch (err) {
+        alert(`Supersede action failed: ${err.message}`);
+      }
+    }
+
+    async function testConflict() {
+      const ex = document.getElementById('classExisting').value;
+      const nw = document.getElementById('classNew').value;
+      const resEl = document.getElementById('classResult');
+
+      try {
+        resEl.innerText = "Analyzing conflict...";
+        const res = await fetch(getApiUrl('/detect_memory_conflict'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ existing_memory: ex, new_memory: nw })
+        });
+        const data = await res.json();
+        resEl.innerText = JSON.stringify(data, null, 2);
+      } catch (err) {
+        resEl.innerText = `Error: ${err.message}`;
+      }
+    }
+
+    async function testRelationship() {
+      const ex = document.getElementById('classExisting').value;
+      const nw = document.getElementById('classNew').value;
+      const resEl = document.getElementById('classResult');
+
+      try {
+        resEl.innerText = "Classifying relationship...";
+        const res = await fetch(getApiUrl('/classify_memory_relationship'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ existing_memory: ex, new_memory: nw })
+        });
+        const data = await res.json();
+        resEl.innerText = JSON.stringify(data, null, 2);
+      } catch (err) {
+        resEl.innerText = `Error: ${err.message}`;
+      }
+    }
+
+    // ----------------------------------------------------
+    // 3. KNOWLEDGE BASE HANDLERS
+    // ----------------------------------------------------
+    function updateFileName(input) {
+      const display = document.getElementById('fileNameDisplay');
+      if (input.files && input.files[0]) {
+        display.innerText = `Selected: ${input.files[0].name}`;
+      }
+    }
+
+    async function handleFileUpload(e) {
+      e.preventDefault();
+      const fileInput = document.getElementById('knowledgeFile');
+      if (!fileInput.files.length) return;
+
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+
+      const chunkSize = document.getElementById('uploadChunkSize').value;
+      const chunkOverlap = document.getElementById('uploadChunkOverlap').value;
+      const userId = getGlobalUserId();
+
+      const btnUpload = document.getElementById('btnUpload');
+      btnUpload.disabled = true;
+
+      try {
+        const url = `${getApiUrl('/add_memory_file_upload')}?chunk_size=${chunkSize}&chunk_overlap=${chunkOverlap}&user_id=${userId}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          body: formData
+        });
+        const data = await res.json();
+        alert(`Document Processing Complete!\nChunks Stored: ${data.chunks_stored}`);
+      } catch (err) {
+        alert(`Upload error: ${err.message}`);
+      } finally {
+        btnUpload.disabled = false;
+      }
+    }
+
+    async function handleSearchKnowledge(e) {
+      e.preventDefault();
+      const query = document.getElementById('knowSearchQuery').value.trim();
+
+      try {
+        const res = await fetch(getApiUrl('/search_knowledge'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            query: query,
+            limit: 5,
+            user_id: getGlobalUserId()
+          })
+        });
+
+        const data = await res.json();
+        renderKnowledgeResults(data.results || []);
+      } catch (err) {
+        alert(`Knowledge Search Error: ${err.message}`);
+      }
+    }
+
+    function renderKnowledgeResults(results) {
+      const listEl = document.getElementById('knowledgeResultsList');
+      if (!results.length) {
+        listEl.innerHTML = `<div class="p-4 text-center text-slate-500">No knowledge snippets found.</div>`;
+        return;
+      }
+
+      listEl.innerHTML = results.map(item => `
+        <div class="p-3 bg-slate-950 rounded-lg border border-slate-800 space-y-1">
+          <div class="flex items-center justify-between">
+            <span class="text-[10px] font-mono text-cyan-400">Reranked Score: ${item.score.toFixed(3)}</span>
+            <span class="text-[10px] font-mono text-slate-500">ID: ${item.id}</span>
+          </div>
+          <p class="font-mono text-slate-300 text-xs leading-relaxed whitespace-pre-wrap">${escapeHtml(item.text)}</p>
+        </div>
+      `).join('');
+    }
+
+    // ----------------------------------------------------
+    // 4. CONTEXTUALIZE TESTER HANDLERS
+    // ----------------------------------------------------
+    async function handleContextualizeTest(e) {
+      e.preventDefault();
+      const rawQuery = document.getElementById('contextRawQuery').value.trim();
+      const historyJson = document.getElementById('contextHistoryJson').value.trim();
+      const resEl = document.getElementById('contextualizedResult');
+
+      try {
+        const historyObj = JSON.parse(historyJson);
+        resEl.innerText = "Processing LLM rewrite...";
+
+        const res = await fetch(getApiUrl('/contextualize_query'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: rawQuery, history: historyObj })
+        });
+
+        const data = await res.json();
+        resEl.innerText = data.contextualized_query || data.original_query;
+      } catch (err) {
+        resEl.innerText = `Error: ${err.message}`;
+      }
+    }
+
+    // Utility: HTML Escaper
+    function escapeHtml(str) {
+      if (!str) return '';
+      return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>

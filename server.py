@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 import json
 from pydantic import BaseModel, Field
 from fastapi import BackgroundTasks
+from fastapi.responses import StreamingResponse
 
 app = FastAPI()
 
@@ -42,7 +43,7 @@ KNOWLEDGE_COLLECTION = "knowledge"
 
 VECTOR_SIZE = 384
 
-DEFAULT_SCORE_THRESHOLD = 0.3
+DEFAULT_SCORE_THRESHOLD = 0.5
 MEMORY_RELATIONSHIP_THRESHOLD = 0.5
 MEMORY_DUPLICATE_THRESHOLD = 0.75
 MEMORY_RELATIONSHIP_LIMIT = 5
@@ -53,7 +54,7 @@ DEFAULT_CHUNK_SIZE = 1000
 DEFAULT_CHUNK_OVERLAP = 200
 
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
-LLM_MODEL = "phi3:mini"
+LLM_MODEL = "qwen2.5:1.5b"
 
 
 # ============================================================
@@ -922,7 +923,7 @@ def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     memory_context = (
         "\n---\n".join(
             [
-                f"[Score: {p.score:.3f}]\n{p.payload.get('text', '')}"
+                f"[Score: {p.score:.3f}]\n{p.payload.get('text', '')[:300]}"
                 for p in memory_results
             ]
         )
@@ -931,24 +932,19 @@ def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     knowledge_context = (
         "\n---\n".join(
             [
-                f"[Score: {p.score:.3f}]\n{p.payload.get('text', '')}"
+                f"[Score: {p.score:.3f}]\n{p.payload.get('text', '')[:300]}"
                 for p in knowledge_results
             ]
         )
         or "No knowledge found."
     )
 
-    # Updated system message forcing brief answers
-    system_message = f"""
-You are a helpful AI assistant.
-CRITICAL INSTRUCTION: Keep your response extremely concise, direct, and brief (2 to 4 sentences maximum). Do NOT give long lectures, unnecessary lists, or conversational filler.
-
---- User Memory ---
+    system_message = f"""You are a concise assistant. Keep answers brief (1-2 sentences).
+--- Memory ---
 {memory_context}
+--- Knowledge ---
+{knowledge_context}"""
 
---- Knowledge Base ---
-{knowledge_context}
-"""
     llm_messages = [{"role": "system", "content": system_message}]
     for msg in request.history:
         llm_messages.append({"role": msg.role, "content": msg.content})
@@ -957,7 +953,11 @@ CRITICAL INSTRUCTION: Keep your response extremely concise, direct, and brief (2
     response = ollama.chat(
         model=LLM_MODEL,
         messages=llm_messages,
-        options={"num_predict": 150},  # Hard token cap to prevent long generation
+        options={
+            "num_predict": 80,  # Keep generated responses concise
+            "num_ctx": 1024,  # Minimal VRAM allocation
+            "temperature": 0.2,
+        },
     )
     answer = response["message"]["content"]
 
@@ -985,6 +985,80 @@ CRITICAL INSTRUCTION: Keep your response extremely concise, direct, and brief (2
         "memory_results_count": len(memory_results),
         "knowledge_results_count": len(knowledge_results),
     }
+
+
+@app.post("/chat/stream")
+def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
+    search_query = contextualize_query(request.query, request.history)
+    memory_results = search_memory(
+        search_query,
+        request.top_k,
+        request.score_threshold,
+        True,
+        user_id=request.user_id,
+    )
+    knowledge_results = search_knowledge(
+        search_query, request.top_k, request.score_threshold, user_id=request.user_id
+    )
+
+    memory_context = (
+        "\n---\n".join(
+            [
+                f"[Score: {p.score:.3f}]\n{p.payload.get('text', '')[:300]}"
+                for p in memory_results
+            ]
+        )
+        or "No memory found."
+    )
+    knowledge_context = (
+        "\n---\n".join(
+            [
+                f"[Score: {p.score:.3f}]\n{p.payload.get('text', '')[:300]}"
+                for p in knowledge_results
+            ]
+        )
+        or "No knowledge found."
+    )
+
+    system_message = f"""You are a concise assistant. Keep answers brief (1-2 sentences).
+--- Memory ---
+{memory_context}
+--- Knowledge ---
+{knowledge_context}"""
+
+    llm_messages = [{"role": "system", "content": system_message}]
+    for msg in request.history:
+        llm_messages.append({"role": msg.role, "content": msg.content})
+    llm_messages.append({"role": "user", "content": request.query})
+
+    # Schedule background memory extraction without blocking streaming
+    def background_memory_extraction(query, uid, sid):
+        cand = analyze_memory(query)
+        if cand.remember:
+            process_memory_candidate(
+                cand.text,
+                cand.type,
+                cand.importance,
+                "conversation",
+                user_id=uid,
+                session_id=sid,
+            )
+
+    background_tasks.add_task(
+        background_memory_extraction, request.query, request.user_id, request.session_id
+    )
+
+    def event_stream():
+        response_stream = ollama.chat(
+            model=LLM_MODEL,
+            messages=llm_messages,
+            stream=True,  # Enable token streaming
+            options={"num_predict": 80, "num_ctx": 1024, "temperature": 0.2},
+        )
+        for chunk in response_stream:
+            yield chunk["message"]["content"]
+
+    return StreamingResponse(event_stream(), media_type="text/plain")
 
 
 def analyze_memory(user_message: str) -> MemoryCandidate:
