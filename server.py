@@ -41,6 +41,10 @@ MEMORY_DUPLICATE_THRESHOLD = 0.75
 # Number of related memories inspected by the memory manager
 MEMORY_RELATIONSHIP_LIMIT = 5
 
+# Phase 8.1 Configuration: Weight for vector similarity vs. memory importance
+# final_score = (ALPHA * similarity_score) + ((1 - ALPHA) * importance)
+IMPORTANCE_ALPHA = 0.7
+
 EMBEDDING_MODEL = "all-MiniLM-L6-v2"
 LLM_MODEL = "phi3:mini"
 
@@ -88,6 +92,7 @@ class SearchRequest(BaseModel):
     query: str
     limit: int = 3
     score_threshold: float = DEFAULT_SCORE_THRESHOLD
+    use_importance_weight: bool = True
 
 
 class ChatRequest(BaseModel):
@@ -471,24 +476,42 @@ def store_knowledge(
 # ============================================================
 
 
+def calculate_weighted_score(
+    similarity_score: float,
+    importance: float,
+    alpha: float = IMPORTANCE_ALPHA,
+) -> float:
+    """
+    Calculate importance-weighted score combining similarity and stored importance.
+    Phase 8.1 enhancement.
+    """
+    return (alpha * similarity_score) + ((1.0 - alpha) * importance)
+
+
 def search_memory(
     query: str,
     limit: int = 3,
     score_threshold: float = DEFAULT_SCORE_THRESHOLD,
+    use_importance_weight: bool = True,
 ):
     """
     Search only active memories from the memory collection.
 
     Superseded memories remain in Qdrant for history/debugging
     but are excluded from normal retrieval.
+
+    Phase 8.1: Applies importance weighting to re-rank search results.
     """
 
     query_embedding = create_embedding(query)
 
+    # Retrieve candidate set with broader limit if weighted ranking is enabled
+    candidate_limit = limit * 3 if use_importance_weight else limit
+
     results = qdrant.query_points(
         collection_name=MEMORY_COLLECTION,
         query=query_embedding,
-        limit=limit,
+        limit=candidate_limit,
         score_threshold=score_threshold,
         query_filter=Filter(
             must=[
@@ -500,7 +523,22 @@ def search_memory(
         ),
     )
 
-    return results.points
+    points = results.points
+
+    if not use_importance_weight or not points:
+        return points[:limit]
+
+    # Re-rank candidates using importance-weighted score
+    ranked_points = []
+    for point in points:
+        importance = float(point.payload.get("importance", 0.5))
+        similarity = float(point.score)
+        weighted_score = calculate_weighted_score(similarity, importance)
+        point.score = weighted_score
+        ranked_points.append(point)
+
+    ranked_points.sort(key=lambda p: p.score, reverse=True)
+    return ranked_points[:limit]
 
 
 # ============================================================
@@ -1915,6 +1953,7 @@ def search_memory_endpoint(request: SearchRequest):
         query=request.query,
         limit=request.limit,
         score_threshold=request.score_threshold,
+        use_importance_weight=request.use_importance_weight,
     )
 
     return {
@@ -2221,13 +2260,14 @@ USER MESSAGE:
 def chat(request: ChatRequest):
 
     # --------------------------------------------------------
-    # 1. Retrieve Memory
+    # 1. Retrieve Memory (with Importance Weighting)
     # --------------------------------------------------------
 
     memory_results = search_memory(
         query=request.query,
         limit=request.top_k,
         score_threshold=request.score_threshold,
+        use_importance_weight=True,
     )
 
     # --------------------------------------------------------
