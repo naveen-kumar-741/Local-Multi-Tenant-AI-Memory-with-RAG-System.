@@ -1,4 +1,5 @@
 from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -18,6 +19,15 @@ import json
 from datetime import datetime, timezone
 
 app = FastAPI()
+
+# Enable CORS for frontend dashboard access
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ============================================================
@@ -47,11 +57,8 @@ LLM_MODEL = "phi3:mini"
 # Qdrant & Embedding Setup (Phase 10: Persistent Disk Storage)
 # ============================================================
 
-# Persistent Qdrant client stored locally in './qdrant_storage'
 qdrant = QdrantClient(path="./qdrant_storage")
 
-# Recreate or ensure collections exist without wiping existing disk data on restart if desired,
-# or use safe initialization. Here we check/create collections safely.
 existing_collections = [col.name for col in qdrant.get_collections().collections]
 
 if MEMORY_COLLECTION not in existing_collections:
