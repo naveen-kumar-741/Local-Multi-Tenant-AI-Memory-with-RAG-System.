@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Header
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel, Field
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -44,26 +44,33 @@ LLM_MODEL = "phi3:mini"
 
 
 # ============================================================
-# Qdrant & Embedding Setup
+# Qdrant & Embedding Setup (Phase 10: Persistent Disk Storage)
 # ============================================================
 
-qdrant = QdrantClient(":memory:")
+# Persistent Qdrant client stored locally in './qdrant_storage'
+qdrant = QdrantClient(path="./qdrant_storage")
 
-qdrant.recreate_collection(
-    collection_name=MEMORY_COLLECTION,
-    vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
-)
+# Recreate or ensure collections exist without wiping existing disk data on restart if desired,
+# or use safe initialization. Here we check/create collections safely.
+existing_collections = [col.name for col in qdrant.get_collections().collections]
 
-qdrant.recreate_collection(
-    collection_name=KNOWLEDGE_COLLECTION,
-    vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
-)
+if MEMORY_COLLECTION not in existing_collections:
+    qdrant.create_collection(
+        collection_name=MEMORY_COLLECTION,
+        vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+    )
+
+if KNOWLEDGE_COLLECTION not in existing_collections:
+    qdrant.create_collection(
+        collection_name=KNOWLEDGE_COLLECTION,
+        vectors_config=VectorParams(size=VECTOR_SIZE, distance=Distance.COSINE),
+    )
 
 model = SentenceTransformer(EMBEDDING_MODEL)
 
 
 # ============================================================
-# Request Models (Phase 9: Added user_id & session_id)
+# Request Models
 # ============================================================
 
 
@@ -202,7 +209,7 @@ def chunk_text_with_overlap(
 
 
 # ============================================================
-# Storage & Retrieval Operations (Phase 9: user_id & session_id)
+# Storage & Retrieval Operations
 # ============================================================
 
 
@@ -375,7 +382,7 @@ def store_knowledge(
 
 
 # ============================================================
-# Search & Filtering Helpers (Phase 9: Scoped to user_id)
+# Search & Filtering Helpers
 # ============================================================
 
 
@@ -450,7 +457,6 @@ def search_memory(
     query_embedding = create_embedding(query)
     candidate_limit = limit * 3 if use_importance_weight else limit
 
-    # Phase 9: Filter strictly by status == active AND user_id == user_id
     filter_conditions = [
         FieldCondition(key="status", match=MatchValue(value="active")),
         FieldCondition(key="user_id", match=MatchValue(value=user_id)),
@@ -487,7 +493,6 @@ def search_knowledge(
 ):
     query_embedding = create_embedding(query)
 
-    # Phase 9: Filter knowledge by user_id
     filter_conditions = [
         FieldCondition(key="user_id", match=MatchValue(value=user_id)),
     ]
