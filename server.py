@@ -19,6 +19,7 @@ import json
 from datetime import datetime, timezone
 import json
 from pydantic import BaseModel, Field
+from fastapi import BackgroundTasks
 
 app = FastAPI()
 
@@ -905,7 +906,7 @@ def search_knowledge_endpoint(request: SearchRequest):
 
 
 @app.post("/chat")
-def chat(request: ChatRequest):
+def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     search_query = contextualize_query(request.query, request.history)
     memory_results = search_memory(
         search_query,
@@ -960,16 +961,22 @@ CRITICAL INSTRUCTION: Keep your response extremely concise, direct, and brief (2
     )
     answer = response["message"]["content"]
 
-    memory_candidate = analyze_memory(request.query)
-    if memory_candidate.remember:
-        process_memory_candidate(
-            memory_candidate.text,
-            memory_candidate.type,
-            memory_candidate.importance,
-            "conversation",
-            user_id=request.user_id,
-            session_id=request.session_id,
-        )
+    # RUN MEMORY EXTRACTION IN THE BACKGROUND (Frees up response time)
+    def background_memory_extraction(query, uid, sid):
+        cand = analyze_memory(query)
+        if cand.remember:
+            process_memory_candidate(
+                cand.text,
+                cand.type,
+                cand.importance,
+                "conversation",
+                user_id=uid,
+                session_id=sid,
+            )
+
+    background_tasks.add_task(
+        background_memory_extraction, request.query, request.user_id, request.session_id
+    )
 
     return {
         "response": answer,
