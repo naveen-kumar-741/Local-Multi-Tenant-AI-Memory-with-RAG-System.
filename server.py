@@ -17,6 +17,8 @@ import pdfplumber
 import io
 import json
 from datetime import datetime, timezone
+import json
+from pydantic import BaseModel, Field
 
 app = FastAPI()
 
@@ -166,6 +168,15 @@ class MemoryCandidate(BaseModel):
     type: str | None = None
     text: str | None = None
     importance: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
+class QueryRewriteOutput(BaseModel):
+    is_standalone: bool = Field(
+        description="True if the query is asking a standalone question (including general questions about user preferences/memories). False ONLY if it uses pronouns like 'it', 'that', 'he' that require context."
+    )
+    standalone_query: str = Field(
+        description="The query to use. If is_standalone is True, return the EXACT latest query."
+    )
 
 
 # ============================================================
@@ -393,36 +404,69 @@ def store_knowledge(
 # ============================================================
 
 
-def contextualize_query(query: str, history: list[ChatMessage]) -> str:
+def contextualize_query(
+    query: str,
+    history: list[ChatMessage],
+) -> str:
+    """
+    Production contextualization using JSON classification.
+    Stops the LLM from replacing summary queries with previous user turns.
+    """
     if not history:
         return query
-    formatted_history = "\n".join(
-        f"{msg.role.upper()}: {msg.content}" for msg in history
+
+    # ONLY extract past USER messages. Ignore long Assistant responses.
+    user_turns = [msg.content for msg in history if msg.role == "user"][-3:]
+
+    if not user_turns:
+        return query
+
+    formatted_user_history = "\n".join(
+        f"- Turn {i+1}: {text}" for i, text in enumerate(user_turns[:-1])
     )
+
     prompt = f"""
-You are a query rewrite system.
-Rewrite the latest user query into a standalone query for retrieval based on history.
-Return ONLY the reformulated query text.
+You are a vector search query classifier.
 
-Chat History:
-{formatted_history}
+TASK:
+Analyze the LATEST USER QUERY.
+Determine if it is already a complete question or a general request (e.g. asking what they prefer, asking about their memories, or asking a broad question).
 
-Latest Query:
+RULES:
+1. If the LATEST USER QUERY is asking a question or asking to recall memories/preferences, set `is_standalone` to true. Do NOT replace it with past sentences.
+2. Set `is_standalone` to false ONLY if the latest query contains ambiguous pronouns ("how do I do it?", "tell me more about that").
+
+Past User Messages:
+{formatted_user_history}
+
+Latest User Query:
 {query}
 
-Standalone Query:
+Return JSON matching this schema:
+{{"is_standalone": true|false, "standalone_query": "string"}}
 """
+
     try:
         response = ollama.chat(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
+            format="json",
             options={"temperature": 0},
         )
-        rewritten = response["message"]["content"].strip()
+
+        parsed = json.loads(response["message"]["content"].strip())
+
+        # If the LLM classifies it as standalone, return original query unchanged
+        if parsed.get("is_standalone", False):
+            return query
+
+        rewritten = parsed.get("standalone_query", "").strip().strip("\"'")
         if rewritten:
             return rewritten
+
     except Exception:
         pass
+
     return query
 
 
@@ -893,11 +937,15 @@ def chat(request: ChatRequest):
         or "No knowledge found."
     )
 
+    # Updated system message forcing brief answers
     system_message = f"""
-You are a helpful AI assistant. Use provided memory and knowledge.
---- Memory ---
+You are a helpful AI assistant.
+CRITICAL INSTRUCTION: Keep your response extremely concise, direct, and brief (2 to 4 sentences maximum). Do NOT give long lectures, unnecessary lists, or conversational filler.
+
+--- User Memory ---
 {memory_context}
---- Knowledge ---
+
+--- Knowledge Base ---
 {knowledge_context}
 """
     llm_messages = [{"role": "system", "content": system_message}]
@@ -905,7 +953,11 @@ You are a helpful AI assistant. Use provided memory and knowledge.
         llm_messages.append({"role": msg.role, "content": msg.content})
     llm_messages.append({"role": "user", "content": request.query})
 
-    response = ollama.chat(model=LLM_MODEL, messages=llm_messages)
+    response = ollama.chat(
+        model=LLM_MODEL,
+        messages=llm_messages,
+        options={"num_predict": 150},  # Hard token cap to prevent long generation
+    )
     answer = response["message"]["content"]
 
     memory_candidate = analyze_memory(request.query)
@@ -930,14 +982,31 @@ You are a helpful AI assistant. Use provided memory and knowledge.
 
 def analyze_memory(user_message: str) -> MemoryCandidate:
     prompt = f"""
-You are a memory extraction system. Determine whether message contains durable user info. Return ONLY JSON.
-MESSAGE: {user_message}
+You are a memory extraction system.
+Analyze the user's message and determine if it contains durable, long-term facts, preferences, personal details, or habits (e.g. technology preferences, favorite foods, job role, locations).
+
+MESSAGE: "{user_message}"
+
+Rules:
+1. If the message states a preference, fact, goal, or personal detail about the user, set "remember" to true.
+2. Extract the core concise statement for "text" (e.g. "Prefers Android over iPhone for mobile").
+3. Assign "type" as "preference", "fact", or "habit".
+4. Assign "importance" between 0.5 and 0.9.
+
+Return JSON strictly matching this schema:
+{{
+    "remember": true | false,
+    "type": "preference" | "fact" | "habit" | null,
+    "text": "extracted memory sentence or null",
+    "importance": float
+}}
 """
     try:
         response = ollama.chat(
             model=LLM_MODEL,
             messages=[{"role": "user", "content": prompt}],
             format="json",
+            options={"temperature": 0},
         )
         parsed = json.loads(response["message"]["content"].strip())
         return MemoryCandidate(**parsed)
