@@ -954,7 +954,6 @@ def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         model=LLM_MODEL,
         messages=llm_messages,
         options={
-            "num_predict": 80,  # Keep generated responses concise
             "num_ctx": 1024,  # Minimal VRAM allocation
             "temperature": 0.2,
         },
@@ -1053,7 +1052,7 @@ def chat_stream(request: ChatRequest, background_tasks: BackgroundTasks):
             model=LLM_MODEL,
             messages=llm_messages,
             stream=True,  # Enable token streaming
-            options={"num_predict": 80, "num_ctx": 1024, "temperature": 0.2},
+            options={"num_ctx": 1024, "temperature": 0.2},
         )
         for chunk in response_stream:
             yield chunk["message"]["content"]
