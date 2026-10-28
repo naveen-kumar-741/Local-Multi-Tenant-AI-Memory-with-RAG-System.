@@ -631,7 +631,7 @@ def detect_memory_conflict(
     new_memory: str, existing_memory: str
 ) -> ConflictDetectionResult:
     prompt = f"""
-Determine whether NEW MEMORY contradicts EXISTING MEMORY. Return ONLY JSON: {{"conflict": true}} or {{"conflict": false}}.
+Determine whether NEW MEMORY contradicts EXISTING MEMORY. Return ONLY JSON: {{"conflict": true, "reason": "<REASON>"}} or {{"conflict": false, "reason": "<REASON>"}}.
 EXISTING MEMORY: {existing_memory}
 NEW MEMORY: {new_memory}
 """
@@ -654,9 +654,9 @@ def classify_memory_relationship(
     new_memory: str, existing_memory: str
 ) -> MemoryRelationshipResult:
     prompt = f"""
-Classify relationship into: duplicate, update, conflict, or unrelated. Return ONLY JSON.
-EXISTING: {existing_memory}
-NEW: {new_memory}
+Classify relationship into: duplicate, update, conflict, or unrelated. Return ONLY JSON: {{"relationship": <RELATIONSHIP>, "reason": "<REASON>"}}.
+EXISTING MEMORY: {existing_memory}
+NEW MEMORY: {new_memory}
 """
     try:
         response = ollama.chat(
